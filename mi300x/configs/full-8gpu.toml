@@ -1,0 +1,72 @@
+[target]
+model = "openai/gpt-oss-120b"
+gpu_ids = [0, 1, 2, 3, 4, 5, 6, 7]
+
+[server]
+image = "rocm/vllm:rocm7.13.0_gfx94X-dcgpu_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1"
+container_name = "power-vllm"
+hf_cache = "~/.cache/huggingface"
+client_host = "127.0.0.1"
+port = 8000
+shm_size = "64g"
+ready_timeout_s = 2400
+max_model_len = 131072
+max_num_seqs = 256
+gpu_memory_utilization = 0.88
+kv_cache_dtype = "auto"
+extra_mounts = []
+extra_args = []
+
+[benchmark]
+results_dir = "~/power/results"
+backend = "openai"
+endpoint = "/v1/completions"
+request_rate = "inf"
+num_warmups = 1
+num_prompts_multiplier = 2
+min_num_prompts = 4
+target_duration_s = 60
+calibration_waves = 1
+minimum_measured_waves = 2
+duration_safety_factor = 1.15
+max_num_prompts = 8192
+sample_interval_s = 0.25
+idle_sample_seconds = 10.0
+metric_percentiles = "50,90,99"
+extra_args = []
+
+[[scenarios]]
+name = "smoke"
+input_len = 256
+output_len = 128
+concurrency = [1, 4]
+
+[[scenarios]]
+name = "interactive"
+input_len = 1024
+output_len = 1024
+concurrency = [1, 4, 16, 64, 256]
+
+[[scenarios]]
+name = "document-qa"
+input_len = 8192
+output_len = 1024
+concurrency = [1, 4, 16, 64, 256]
+
+[[scenarios]]
+name = "decode-heavy"
+input_len = 8192
+output_len = 8192
+concurrency = [1, 4, 16, 32]
+
+[[scenarios]]
+name = "large-kv-32k"
+input_len = 32768
+output_len = 2048
+concurrency = [1, 4, 8, 16]
+
+[[scenarios]]
+name = "large-kv-64k"
+input_len = 65536
+output_len = 4096
+concurrency = [1, 4, 8, 16]

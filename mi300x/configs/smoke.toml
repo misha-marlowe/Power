@@ -1,0 +1,37 @@
+[target]
+model = ""
+gpu_ids = []
+
+[server]
+image = "rocm/vllm:rocm7.13.0_gfx94X-dcgpu_ubuntu24.04_py3.13_pytorch_2.10.0_vllm_0.19.1"
+container_name = "power-vllm"
+hf_cache = "~/.cache/huggingface"
+client_host = "127.0.0.1"
+port = 8000
+shm_size = "64g"
+ready_timeout_s = 1800
+max_model_len = 4096
+max_num_seqs = 64
+gpu_memory_utilization = 0.85
+kv_cache_dtype = "auto"
+extra_mounts = []
+extra_args = []
+
+[benchmark]
+results_dir = "~/power/results"
+backend = "openai"
+endpoint = "/v1/completions"
+request_rate = "inf"
+num_warmups = 1
+num_prompts_multiplier = 2
+min_num_prompts = 8
+sample_interval_s = 0.5
+idle_sample_seconds = 2.0
+metric_percentiles = "50,90,99"
+extra_args = []
+
+[[scenarios]]
+name = "smoke"
+input_len = 256
+output_len = 128
+concurrency = [1, 4]
