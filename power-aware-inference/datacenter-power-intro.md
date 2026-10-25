@@ -10,33 +10,9 @@ Here, **datacenter** means the facility. **DC electricity** means direct current
 
 This is an illustrative large-campus AC design. Voltages are examples, not universal requirements. Smaller sites may receive medium-voltage power directly from an off-site utility substation.
 
-```mermaid
-flowchart TD
-    GRID["Utility transmission grid<br/>Example: 230 kV AC"]
-    SUB["Substation — on-site or off-site<br/>Example: 230 kV → 34.5 kV AC<br/>Transformers, switching, protection, metering"]
-    TX["Campus feeders + building transformers<br/>Example: 34.5 kV → 480 V AC"]
-    GEN["On-site standby generators<br/>Fuel → electricity<br/>Backup source after startup"]
-    ATS["Transfer equipment + switchgear<br/>Select utility or generator supply"]
-    UPS["UPS: uninterruptible power supply<br/>Power conditioning + uninterrupted output"]
-    BAT["Batteries<br/>Store energy; bridge interruptions"]
-    DIST["PDUs / busways / rack distribution<br/>Deliver power to individual racks"]
-    PSU["Server PSUs or rack power shelves<br/>Convert AC → DC"]
-    GPU["Board voltage regulators → GPUs / CPUs / memory"]
-    COOL["Separate facility circuits<br/>Cooling, pumps, fans, other loads"]
+![Compact diagram of utility power, substation, transformers, transfer switchgear, UPS, rack power, generators, batteries, and cooling.](assets/datacenter-power-flow.png)
 
-    GRID --> SUB --> TX --> ATS --> UPS --> DIST --> PSU --> GPU
-    GEN --> ATS
-    UPS -->|Charging| BAT
-    BAT -->|Discharging| UPS
-    ATS --> COOL
-
-    classDef supply fill:#eef2ff,stroke:#5570ad,color:#172554;
-    classDef backup fill:#ecfdf5,stroke:#268567,color:#064e3b;
-    classDef load fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
-    class GRID,SUB,TX,ATS supply;
-    class GEN,UPS,BAT backup;
-    class DIST,PSU,GPU,COOL load;
-```
+[Scalable diagram (SVG)](assets/datacenter-power-flow.svg)
 
 Real sites repeat these paths for redundancy. Generator connections and transfer equipment can sit at other voltage levels; some facilities distribute batteries to racks. Cooling has its own backup design and is not necessarily on the IT UPS. [PNNL/DOE architecture reference, §2](https://www.energy.gov/sites/default/files/2026-01/Data_Center_EMT_Models.pdf)
 

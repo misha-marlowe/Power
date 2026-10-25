@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="510" viewBox="0 0 1320 510" role="img" aria-labelledby="title desc">
+<title id="title">Datacenter power: grid to GPU</title>
+<desc id="desc">Utility grid feeds a substation, building transformers, transfer switchgear, UPS, then rack distribution and server power supplies. Standby generators feed transfer switchgear. Batteries charge from and discharge into the UPS. Cooling uses separate circuits from the transfer switchgear.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#52647d"/></marker></defs>
+<rect width="1320" height="510" rx="18" fill="#ffffff"/>
+<g font-family="DejaVu Sans, sans-serif">
+<text x="24" y="39" font-size="27" font-weight="700" fill="#14243b">Datacenter power: grid to GPU</text>
+<text x="24" y="70" font-size="18" fill="#52647d">Normal supply → voltage conversion → source selection → backup protection → computing</text>
+
+<path d="M 200 190 H 236" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 420 190 H 456" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 640 190 H 676" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 860 190 H 896" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 1080 190 H 1116" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 770 330 V 264" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 990 264 V 326" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<path d="M 710 260 V 300 H 550 V 326" fill="none" stroke="#52647d" stroke-width="2.2"/>
+<text x="782" y="302" text-anchor="start" font-size="16" fill="#52647d" font-weight="400">after startup</text>
+<text x="1003" y="302" text-anchor="start" font-size="16" fill="#52647d" font-weight="400">charge / discharge</text>
+<rect x="20" y="110" width="180" height="150" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="110.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Utility grid</text>
+<text x="110.0" y="174" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">230 kV AC</text>
+<text x="110.0" y="198" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">example supply</text>
+<rect x="240" y="110" width="180" height="150" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="330.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Substation</text>
+<text x="330.0" y="174" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">230 → 34.5 kV</text>
+<text x="330.0" y="198" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">on-site or off-site</text>
+<rect x="460" y="110" width="180" height="150" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="550.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Building</text>
+<text x="550.0" y="166" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">transformers</text>
+<text x="550.0" y="199" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">34.5 kV → 480 V</text>
+<text x="550.0" y="223" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">example voltages</text>
+<rect x="680" y="110" width="180" height="150" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="770.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Transfer +</text>
+<text x="770.0" y="166" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">switchgear</text>
+<text x="770.0" y="199" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Select source;</text>
+<text x="770.0" y="223" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">protect circuits</text>
+<rect x="900" y="110" width="180" height="150" rx="12" fill="#ecf8f2" stroke="#349574" stroke-width="1.5"/>
+<text x="990.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">UPS</text>
+<text x="990.0" y="174" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Conditions power;</text>
+<text x="990.0" y="198" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">bridges outages</text>
+<rect x="1120" y="110" width="180" height="150" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="1210.0" y="141" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Rack power</text>
+<text x="1210.0" y="174" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">PDU / busway</text>
+<text x="1210.0" y="198" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">PSU: AC → DC</text>
+<text x="1210.0" y="222" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Regulators → chips</text>
+<rect x="460" y="330" width="180" height="110" rx="12" fill="#f0f4fc" stroke="#7a94bd" stroke-width="1.5"/>
+<text x="550.0" y="361" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Cooling</text>
+<text x="550.0" y="394" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Separate circuits</text>
+<text x="550.0" y="418" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Backup varies</text>
+<rect x="680" y="330" width="180" height="110" rx="12" fill="#ecf8f2" stroke="#349574" stroke-width="1.5"/>
+<text x="770.0" y="361" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Generators</text>
+<text x="770.0" y="394" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Fuel → electricity</text>
+<text x="770.0" y="418" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Standby backup</text>
+<rect x="900" y="330" width="180" height="110" rx="12" fill="#ecf8f2" stroke="#349574" stroke-width="1.5"/>
+<text x="990.0" y="361" text-anchor="middle" font-size="21" fill="#14243b" font-weight="700">Batteries</text>
+<text x="990.0" y="394" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Stored energy</text>
+<text x="990.0" y="418" text-anchor="middle" font-size="17" fill="#52647d" font-weight="400">Immediate backup</text>
+<text x="24" y="481" text-anchor="start" font-size="17" fill="#52647d" font-weight="400">Illustrative AC design. Voltages and topology vary; redundant paths and UPS bypass are omitted.</text>
+<polygon points="236,190 225,184 225,196" fill="#52647d"/>
+<polygon points="456,190 445,184 445,196" fill="#52647d"/>
+<polygon points="676,190 665,184 665,196" fill="#52647d"/>
+<polygon points="896,190 885,184 885,196" fill="#52647d"/>
+<polygon points="1116,190 1105,184 1105,196" fill="#52647d"/>
+<polygon points="770,264 764,275 776,275" fill="#52647d"/>
+<polygon points="990,264 984,275 996,275" fill="#52647d"/>
+<polygon points="990,326 984,315 996,315" fill="#52647d"/>
+<polygon points="550,326 544,315 556,315" fill="#52647d"/></g></svg>
