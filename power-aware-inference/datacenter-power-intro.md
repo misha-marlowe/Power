@@ -26,6 +26,25 @@ Real sites repeat these paths for redundancy. Generator connections and transfer
 | **PDU: power distribution unit / busway** | Splits and routes power toward racks. A facility PDU and a rack outlet strip are different scales of distribution. |
 | **PSU: power supply unit** | Converts incoming power to DC; board regulators then supply the voltages chips need. |
 
+### From one power path to many racks
+
+The compact diagram above follows the equipment along one path. The POLCA figure below zooms out to show **how power branches across a datacenter**, including alternative supply paths.
+
+<img src="assets/polca-power-hierarchy.png" width="520" alt="POLCA Figure 2: utility and generator feed an ATS, which supplies multiple UPS units and interconnected PDU feeds serving groups of racks.">
+
+*Source: Patel et al., [Characterizing Power Management Opportunities for LLMs in the Cloud, ASPLOS 2024, Figure 2](https://www.microsoft.com/en-us/research/uploads/prod/2024/03/GPU_Power_ASPLOS_24.pdf#page=2).*
+
+Read it from top to bottom:
+
+1. **Utility + generator → ATS:** the transfer switch selects the supply. Substations and transformers are omitted here; they still perform the voltage conversions shown in the first diagram.
+2. **ATS → several UPS units:** these are separate branches serving groups of loads, not four UPS stages that electricity passes through in sequence.
+3. **UPS units → PDUs:** the lines illustrate multiple supply paths. A line crossing is not necessarily a connection; the small bridge-shaped crossings indicate wires passing without joining.
+4. **PDUs → racks:** each column represents a group of racks, numbered 1 through *n*. The extra incoming paths illustrate redundant feeds, not racks generating electricity for their neighbors.
+
+**Redundancy needs reserved capacity.** Alternative paths can support maintenance or failures only if the remaining equipment can carry the transferred load. The drawing alone does not specify the exact redundancy scheme or available failover capacity.
+
+This hierarchy also explains POLCA's control point: it monitors **combined demand at a row-level PDU**. Individual servers' peaks need not coincide, but their simultaneous total must fit the equipment supplying that row. [Paper, §§2 and 6.3](https://www.microsoft.com/en-us/research/uploads/prod/2024/03/GPU_Power_ASPLOS_24.pdf)
+
 ## 2. What happens during an outage?
 
 1. **Normally:** the utility supplies the load; batteries remain charged. In a common double-conversion UPS, AC is converted to DC and back to AC even during normal operation.
