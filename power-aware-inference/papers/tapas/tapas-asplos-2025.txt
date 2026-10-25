@@ -1,0 +1,1062 @@
+    TAPAS: Thermal- and Power-Aware Scheduling for
+           LLM Inference in Cloud Platforms
+        Jovan Stojkovic1                       Chaojie Zhang                  Íñigo Goiri                        Esha Choukse
+      University of Illinois at           Microsoft Azure Research  Microsoft Azure Research               Microsoft Azure Research
+     Urbana-Champaign, USA                     Redmond, USA              Redmond, USA                           Redmond, USA
+       jovans2@illinois.edu              chaojiezhang@microsoft.com inigog@microsoft.com                  esha.choukse@microsoft.com
+
+           Haoran Qiu                        Rodrigo Fonseca               Josep Torrellas                    Ricardo Bianchini
+    Microsoft Azure Research              Microsoft Azure Research     University of Illinois at                 Microsoft Azure
+         Redmond, USA                          Redmond, USA           Urbana-Champaign, USA                      Redmond, USA
+   haoran.qiu@microsoft.com              fonseca.rodrigo@microsoft.com torrella@illinois.edu                ricardob@microsoft.com
+
+
+
+Abstract                                                               CCS Concepts: • Computer systems organization →
+The rising demand for generative large language models                 Cloud computing; • Hardware → Temperature optimiza-
+(LLMs) poses challenges for thermal and power manage-                  tion; Enterprise level and data centers power issues.
+ment in cloud datacenters. Traditional techniques are of-              Keywords: Large language models, GPUs, thermal manage-
+ten inadequate for LLM inference due to the fine-grained,              ment, power management, cloud datacenters
+millisecond-scale execution phases, each with distinct per-
+                                                                       ACM Reference Format:
+formance, thermal, and power profiles. Additionally, LLM
+                                                                       Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Esha Choukse, Haoran
+inference workloads are sensitive to various configuration
+                                                                       Qiu, Rodrigo Fonseca, Josep Torrellas, and Ricardo Bianchini. 2025.
+parameters (e.g., model parallelism, size, and quantization)           TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference
+that involve trade-offs between performance, temperature,              in Cloud Platforms. In Proceedings of the 30th ACM International
+power, and output quality. Moreover, clouds often co-locate            Conference on Architectural Support for Programming Languages
+SaaS and IaaS workloads, each with different levels of visi-           and Operating Systems, Volume 2 (ASPLOS ’25), March 30-April 3,
+bility and flexibility.                                                2025, Rotterdam, Netherlands. ACM, New York, NY, USA, 16 pages.
+   To address these challenges, we propose TAPAS, a thermal-           https://doi.org/10.1145/3676641.3716025
+and power-aware framework designed for LLM inference
+clusters in the cloud. TAPAS enhances cooling and power                1    Introduction
+oversubscription capabilities, reducing the total cost of own-         Motivation. Generative large language models (LLMs) are
+ership (TCO) while effectively handling emergencies (e.g.,             increasingly being used in various domains, such as health-
+cooling and power failures). TAPAS leverages historical tem-           care [52], developer productivity [19], and education [9].
+perature and power data, along with the adaptability of SaaS           Their use drives a high demand for LLM inference clus-
+workloads, to: (1) efficiently place new GPU workload VMs              ters [28], requiring robust infrastructure with sophisticated
+within cooling and power constraints, (2) route LLM infer-             software and costly hardware. LLMs in the cloud typically
+ence requests across SaaS VMs, and (3) reconfigure SaaS VMs            run on virtual machines (VMs) powered by the latest GPUs,
+to manage load spikes and emergency situations.                        such as NVIDIA’s A100 [46] and H100 [45]. These GPUs con-
+   Our evaluation on a large GPU cluster demonstrates sig-             sume significant power, challenging the cooling and power
+nificant reductions in thermal and power throttling events,            capacities of datacenters, which are major contributors to
+boosting system efficiency.                                            the total cost of ownership (TCO) [8, 24, 43]. For instance,
+                                                                       the A100 and H100 GPUs have thermal design powers (TDP)
+                                                                       of 6.5 kW and 10.2 kW, respectively, and require substantial
+                                                                       cooling capabilities to maintain safe operating temperatures.
+                     This work is licensed under a Creative Commons    GPU servers and racks are typically limited by power density
+                     Attribution International 4.0 License.            rather than by space constraints.
+                                                                          Data centers hosting GPUs are organized into rows of
+ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands             server racks equipped with cooling systems to dissipate
+© 2025 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-1079-7/25/03.                                      1 Jovan Stojkovic is affiliated with the University of Illinois at Urbana-
+
+https://doi.org/10.1145/3676641.3716025                                Champaign, but was at Microsoft Azure Research during this work.
+ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                         Jovan Stojkovic et al.
+
+
+                                                                          TAPAS gracefully manages occasional load spikes and
+    Configuration parameters       Perf   Temp    Power      Quality   emergency events (e.g., cooling or power failures) through
+     Model Size (e.g., 70B→7B)      ↑       ↓       ↓          ↓↓      three core principles. First, it places GPU VMs in a thermal-
+   Quantization (e.g., FP16→FP8)    ↑       ↓       ↓           ↓      and power-aware manner by leveraging historical data on
+    Parallelism (e.g., TP8→TP2)     ↓       ↑       ↓          −       temperature, power consumption, and service load. Second,
+   Frequency (e.g., 2GHz→1GHz)      ↓       ↓       ↓          −
+      Batch Size (e.g., 64→16)      ↓       ↓       ↓          −
+                                                                       it routes requests across LLM instances based on the load of
+                                                                       individual VMs, as well as the available thermal and power
+Table 1. Impact of different parameters on the performance,            capacity of the underlying infrastructure. Third, it reconfig-
+temperature, power, and quality of an LLM inference server.            ures SaaS instances within the cooling and power hierarchies
+TP stands for tensor parallelism.                                      to restore temperature and power levels to safe limits.
+
+                                                                       Results. We evaluate TAPAS on a large GPU cluster using
+heat [38] and a power hierarchy for efficient power dis-               production traces from Microsoft Azure. Our results show
+tribution [83]. Cooling systems need to manage the heat                that TAPAS maintains the P99 tail latency of inference re-
+generated by the servers at all times. However, cooling effi-          quests while reducing maximum temperature by 17% and
+ciency can vary spatially (e.g., some GPUs within a server             peak row power by 23%. These reductions create more oppor-
+may be hotter that others) and temporally (e.g., different             tunities for oversubscription, enabling up to 40% additional
+external temperatures at different times impact cooling). At           capacity and, consequently, lowering datacenter TCO.
+each level of the power hierarchy, servers share a common                To validate our findings at scale, we use traces from hun-
+power supply, and exceeding the total power draw leads to              dreds of production racks across a set of datacenters and sim-
+power capping. Hence, proper cooling and power provision-              ulate TAPAS. Compared to other practical policies, TAPAS
+ing is essential—both during normal operations and during              reduces thermal and power throttling events by 97% and
+cooling/power failures and emergencies.                                99%, respectively. In addition, we demonstrate that TAPAS
+   While advancements in LLM inference cluster perfor-                 operates effectively during cooling and power failures.
+mance have been achieved through software systems [14, 27,
+42, 81, 86], hardware techniques [4, 49, 84], and model ar-            Summary. We make the following main contributions:
+chitectures [41, 71], thermal and power challenges have not
+received the same level of attention [48, 56, 65, 67]. In tradi-       • Characterization of the thermal and power properties of
+tional datacenters, thermal [20, 38, 43, 50] and power [22, 32,          GPU-based LLM inference workloads and their behavior
+51, 68, 83] management have been extensively studied. How-               at production scale.
+ever, we find that the unique characteristics of LLM inference         • TAPAS, the first thermal- and power-aware scheduling
+workloads make traditional approaches sub-optimal.                       scheme for LLM inference systems.
+   In this paper, we target public clouds that host both Software-     • A thorough evaluation of TAPAS in a GPU cluster using
+as-a-Service (SaaS) and Infrastructure-as-a-Service (IaaS)               large-scale production traces.
+GPU workloads. SaaS workloads are transparent GPU VMs
+managed by the cloud provider, while IaaS workloads are
+opaque GPU VMs with no provider visibility. SaaS workloads             2   Characterizing Challenges in Thermal
+admit configuration adjustments, while IaaS VMs remain                     and Power Infrastructure for GPUs
+unmodifiable. SaaS workloads run LLM inference, which in-              To identify the challenges in managing cooling and power
+volves several configuration parameters (e.g., GPU frequency,          for GPU workloads, we characterize the datacenter infras-
+batch size, model parallelism, parameter count, and preci-             tructure required to support these workloads. We focus on
+sion) that balance performance, thermal output, power, and             spatial and temporal heterogeneity in the usage of thermal
+result quality, as shown in Table 1. In addition, LLM inference        and power infrastructure, which can be exploited to operate
+comprises distinct phases, each with unique performance,               GPU workloads more efficiently. We introduce equations to
+thermal, and power characteristics [49].                               help us model thermal and power aspects at datacenter scale.
+Our work. To address these challenges, we propose TAPAS,
+the first thermal- and power-aware scheduling scheme de-               Datacenter overview. Cloud providers host a variety of ser-
+signed specifically for LLM inference clusters in the cloud.           vices from multiple users on shared infrastructure. We study
+TAPAS maximizes cooling and power oversubscription while               datacenters hosting both A100 [46] and H100 [45] GPUs,
+minimizing the impact on IaaS workloads and maintaining                which are typically used for LLMs [49]. Servers in a datacen-
+performance and accuracy for SaaS workloads. In addition,              ter are arranged in rows of racks. Due to the size and power
+TAPAS dynamically adjusts LLM workloads in response to                 density of GPUs, racks and rows host fewer servers than
+power or cooling failures in a datacenter. The result is sub-          in general-purpose datacenters. These datacenters also host
+stantially reduced cloud platform TCO.                                 other infrastructure for storage, network, and management.
+TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms                                               ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+                                                              23                                                      30
+                                                                                                                      25
+
+
+                                                                                                   Temperature (°C)
+       AHU                Cold aisle
+
+                                                                                                                      20
+
+
+
+
+                                                                   Median inlet temperature (°C)
+                                                              22
+                          Hot aisle
+                                                                                                                                                                               Outside
+                                                                                                                      15                                                       Server 1
+       AHU                                                                                                                                                                     Server 2
+                                                              21                                                      10
+                                                                                                                                                                               Server 3
+Rows                                                                                                                  5
+                                                                                                                      01/08   05/08   09/08   13/08   17/08   21/08    25/08   29/08
+                                                              20
+       AHU
+                                                                                                         Figure 2. Inlet and outside temperatures for three sample
+                                                                                                         servers in one datacenter throughout August 2024.
+                                                              19
+
+       AHU
+
+
+                                                              18                                         devices in the datacenter compensate. However, this results
+                         Racks in row
+                                                                                                         in reduced cooling capacity, which may increase the temper-
+Figure 1. Sample datacenter layout illustrating 80 racks                                                 ature across all cold aisles in the datacenter. If an AHU fails,
+organized into 8 rows with 4 cold aisles. The rack color                                                 the other AHUs in the aisle handle the airflow. Insufficient
+represents the inlet temperatures for the top server.                                                    airflow from the AHUs in the aisle leads to heat recirculation,
+                                                                                                         raising the temperature of all servers in the two rows.
+                                                                                                        Characterization. To understand the thermal impact of the
+2.1          Cooling                                                                                    cooling infrastructure, we study a sample of our datacenters
+Infrastructure. GPU servers generate a large amount of                                                  at Microsoft Azure containing tens of thousands of GPUs
+heat, while their temperature needs to stay below a specific                                            (including both A100 and H100) across three regions with
+threshold (e.g., 85°C for GPUs). On exceeding the threshold,                                            varying climates. The study spans three months, from July
+the hardware starts throttling the computation to prevent                                               1𝑠𝑡 to August 30𝑡ℎ , 2024, covering the warmer months when
+failures and permanent damage [44].                                                                     cooling demands are highest due to elevated outside temper-
+   Depending on the regional climate, datacenters may use                                               atures. In addition, one of the datacenters located in a colder
+technologies like mechanical or adiabatic cooling to lower                                              region is included to account for cooler climate setups. We
+temperatures [15]. While other alternatives exist (e.g., liquid                                         collect data on inlet and outlet temperatures for each server,
+cooling [24]), we focus on air cooling as it is the most com-                                           the outside temperature, and the temperature and power of
+monly used method in today’s datacenters [15, 16, 23, 40].                                              each component (e.g., GPU and memory), reporting the aver-
+Many of our insights can be applied to other technologies.                                              ages every 10 minutes. This 10-minute interval aligns with
+   Datacenters are usually arranged in aisles composed of                                               the frequency of all sensors and enables the approximation
+two rows. Figure 1 illustrates an example of airflow within                                             of heat from average power. While we discuss individual
+one of the rooms in one of the datacenters. The air handling                                            examples, our insights are derived from the full dataset.
+units (AHUs) in each row blow cold air from the datacenter-                                             Outside temperature. Cooling technologies like adiabatic cool-
+level cooling devices (e.g., adiabatic cooling towers in evapo-                                         ing [15, 16, 20, 23, 38, 40] use outside air when it is cold for
+rative cooling) into the cold aisle. The servers use fans with                                          efficiency. Figure 2 shows the inlet temperature for three
+modulated speeds based on activity to draw cold air from                                                servers in the same aisle and the outside temperature in Au-
+the front, pass it through the server (including the GPUs),                                             gust 2024. The inlet temperature follows the trend of the
+and exhaust the heated air into the hot aisle. The cooling                                              outside temperature.
+devices then take this hot air and cool it down again. To                                                  Figure 3 shows the inlet and outside temperature for these
+avoid heat recirculation (i.e., hot air returning to the cold                                           servers over three months. Each point represents the inlet
+aisle), the airflow provided by the AHUs must exceed the                                                temperature for Server 3 and the outside temperature every
+airflow consumed by the servers in the cold aisle.                                                      10 minutes. The lines are a regression of these points for each
+Provisioning. Datacenter operators usually provision the                                                of the servers. When it is cold outside, the cooling maintains
+cooling infrastructure to sustain their peak load [38]. This                                            the inlet temperature (e.g., over 18°C) to avoid increasing
+means they need to have (1) enough airflow in each aisle (i.e.,                                         humidity, which increases failures [20]. Over 15°C outside,
+AHUs) to prevent heat recirculation and (2) enough cooling                                              the inlet temperature increases linearly with the outside.
+capacity in the datacenter to lower the temperature within                                              When it is hot outside (i.e., 25°C), the cooling lowers the
+operating conditions. Operators can add racks to rows as                                                temperature. Locations with higher temperatures are less
+long as both conditions are met.                                                                        sensitive to the outside temperature.
+Failures. Datacenters typically build redundancy to handle                                               Datacenter layout. Given the physical layout, the inlet tem-
+failures (e.g., N+1 [83]). When a cooling device fails, other                                            perature for each server is not homogeneous, and there are
+        ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                                      Jovan Stojkovic et al.
+
+
+
+
+        Figure 3. Regression analysis comparing inlet and outside
+        temperatures for three sample servers. The figure includes                                  Figure 5. Inlet temperature as a function of datacenter load
+        actual measurements for Server 3.                                                           and outside temperature. It includes actual measurements
+                                                                                                    and regression lines per power load levels.
+                         23
+
+
+
+
+Inlet temperature (°C)
+                                                                                                                                             GPU power                  70
+                                                                                                               600                           Outlet temp
+
+
+
+                                                                                                                                                                             Temperature (°C)
+                                                                                                                                             Inlet temp                 60
+
+                                                                                               Power (Watts)
+                         22                                                                                                                  GPU mem temp
+                                                                                                               400                           GPU temp                   50
+                                                                                                                                                                        40
+                         21                                                                                    200
+                                                                                                                                                                        30
+                               Row              Rack within row         Height in rack                        0                                                         20
+                                                                                                           01/08     08/08   15/08   22/08      01/09       08/09
+        Figure 4. Inlet temperature distribution across physical en-
+        tities: rows, racks within rows, and height within racks.                                   Figure 6. GPU and memory temperature over time alongside
+                                                                                                    inlet temperature.
+
+        hotspots. Figures 2 and 3 show how Server 1 is consistently
+        warmer (∼ 2°C) than the other two. Figure 1 shows that the
+        median temperature across racks and rows varies: the end
+        of some rows is warmer than others because of airflow and
+        construction differences. These airflow patterns are hard to
+        estimate beforehand and require measuring them empiri-
+        cally or expensive simulations. Figure 4 shows the median
+        temperature over the three months depending on the physi-
+        cal entity. For each physical entity (i.e., index on x-axis), the                           Figure 7. GPU temperature as a function of inlet tempera-
+        figure shows the average temperature of that entity across                                  ture and GPU power load over 10 minutes using data from
+        a subset of our datacenters. It represents how temperature                                  Figure 6. The figure includes a regression curve based on
+        varies spatially across physical entities. Some rows have tem-                              inlet temperature and GPU load.
+        peratures up to 1°C higher than others, with racks within a
+        row showing differences of up to 2°C. The height within the
+        rack has a minor impact.                                                                   GPU temperature. Once the inlet air enters the server, the
+        Datacenter load. The amount of heat in the datacenter also                                 fans circulate the cold air to cool down the server compo-
+        affects the inlet temperature. Cooling devices usually lower                               nents (e.g., GPUs and their memory). Figure 6 shows the
+        the outlet temperature by Δ𝑇 (e.g., 10°C). When the heat                                   GPU and memory temperature, along with the inlet and
+        generated by the servers increases, the inlet temperature also                             outlet temperature, and GPU power for an example server
+        increases. Figure 5 shows the regression between datacenter                                running tests for this work over 45 days. For confidentiality,
+        load (average power for 10 minutes) and inlet temperature                                  we display results from a test server running non-production
+        for one server in a hot region. For example, when it is 35°C                               workloads. The GPU memory is warmer than the GPU and
+        outside, there is an inlet temperature difference of 2°C when                              there is an offset between inlet and outlet. Figure 7 displays
+        the load is low and high. Note that the correlation with                                   a linear regression of the temperature of one GPU compared
+        datacenter load is much lower than with inlet temperature.                                 to the inlet temperature and GPU load. This regression has a
+        Using the three months of data, we apply regression to model                               mean absolute error of less than 1°C. The GPU temperature
+        the inlet temperature for each server 𝑠:                                                   is sensitive to both the GPU load and the server inlet tem-
+                                                                                                   perature. This regression also captures the inlet temperature
+                              ∀𝑠 ∈𝑆 𝑇𝑖𝑛𝑙𝑒𝑡,𝑠 = 𝑓𝑖𝑛𝑙𝑒𝑡,𝑠 (𝑇𝑜𝑢𝑡𝑠𝑖𝑑𝑒 , LoadDC )             (1)       increase caused by power leakage [2].
+      TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms                         ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+
+                     70            GPU1          GPU5                                              840 and 1105 cubic feet per minute (CFM) at 80% speed with
+                                   GPU2          GPU6                                              pulse width modulation (PWM) fans for A100 and H100 re-
+
+
+Temperature (°C)
+                     60            GPU3          GPU7
+                                   GPU4          GPU8                                              spectively [45, 46]. All servers follow a similar linear function
+                     50                                                                            with very small differences: 𝑓𝑎𝑖𝑟 (𝐿𝑜𝑎𝑑𝐺𝑃𝑈 ,𝑠 ). As mentioned,
+                     40                                                                            we need to guarantee the provisioned airflow from the AHU
+                     30                                                                            is larger than the aggregated server airflow requirement:
+                                                        Sorted time
+                                                                                                                     ∑︁
+                                                                                                          ∀Aisle∈𝐷𝐶         𝑓air (Load𝐺𝑃𝑈 ,𝑠 ) ≤ ProvAHUAisle (3)
+                                                                                                                    𝑠 ∈𝑆 Aisle
+       Figure 8. Sorted GPU temperatures for 8 GPUs correspond-
+       ing to the data in Figure 6.                                                                Insight #1: For effective thermal management, cloud opera-
+                                                                                                   tors must consider temporal heterogeneity due to variations
+                     100                                                     80                    in outside temperature and load, spatial heterogeneity related
+
+
+
+CDF server×GPU (%)
+                                     GPU                                                 GPU
+
+
+                                                          Temperature (°C)
+                      80             Memory                                  70          Memory    to datacenter and server layouts, and airflow requirements.
+                      60
+                                                                             60                    2.2   Power
+                      40
+                      20                                                     50                    Infrastructure. Datacenters typically implement a three-
+                       0                                                     40                    level power distribution hierarchy to deliver electricity from
+                           40       50    60      70     80                       GPU1
+                                                                                  GPU2
+                                                                                                   the utility grid to individual servers [74, 79, 83]. At the high-
+                                    Temperature (°C)
+                                                                                  GPU3
+                                                                                  GPU4
+                                                                                  GPU5
+                                                                                  GPU6
+                                                                                                   est level, an Automatic Transmission Switch (ATS) directs
+                                                                                  GPU7
+                                                                                  GPU8
+
+       Figure 9. Distribution of temperatures for over 3,000 GPUs                                  power from the grid to multiple Uninterruptible Power Sup-
+       and their memory at high load with comparable inlet tem-                                    plies (UPS). Each UPS shares a fraction of the total datacenter
+       peratures in a single data center.                                                          power load and is connected to a series of Power Distribution
+                                                                                                   Unit (PDU) pairs. These PDU pairs further step down the
+                                                                                                   voltage and support multiple rows of server racks.
+      GPU heterogeneity. Figure 8 shows the temperatures of the 8                                  Provisioning. To prevent tripping the circuit breakers, dat-
+      GPUs in a DGX A100 [46] server running the same workload.                                    acenter operators provision for peak power usage at each
+      Despite identical inlet temperatures and GPU utilization at                                  level of the hierarchy to account for worst-case scenarios.
+      each point in time, the temperatures of individual GPUs can                                  For safety, when the total power draw exceeds the power
+      differ by up to 10°C. This variation is due to server layout                                 supply, servers within that level are power-capped. For de-
+      (e.g., components obstructing airflow to certain GPUs) and                                   sign simplicity and to reduce implementation costs, these
+      manufacturing variations in the GPUs themselves (i.e., pro-                                  power limits are further distributed down the hierarchy ho-
+      cess variation [2]). When the temperature within the server                                  mogeneously, eventually limiting the number of server racks
+      is high, the fans will increase airflow to cool the GPUs. It is                              that can be provisioned within the budget. Operators can
+      important to account for this when provisioning the AHUs.                                    oversubscribe the power capacity by adding racks to a row,
+         Extending the insights to servers running production work-                                as long as they remain within the row-level power envelope.
+      loads at scale, Figure 9 shows the heterogeneity in tempera-
+      ture across GPUs in one datacenter running high GPU load                                     Failures. To ensure high availability, clouds implement re-
+      and similar inlet temperatures. Despite this, there is a range                               dundancy at each power hierarchy level. For instance, prior
+      of over 20°C across GPUs in the same datacenter. Notably,                                    work describes a setup with 4N/3 redundancy at the UPS
+      the temperature of the GPU memory is slightly lower than                                     level and 2N at the PDU level [83]. When a UPS fails, its
+      the GPU itself. The right side of Figure 9 shows the median                                  load is redistributed among the remaining three units. Under
+      temperature for each of the 8 GPUs in the server and their                                   heavy load, this can push the others over capacity, requiring
+      inter-quartile range. The GPUs with even identifiers (e.g.,                                  each unit to quickly reduce its load to maintain limits, effec-
+      GPU2 and GPU4) exhibit a lower temperature due to the                                        tively lowering the datacenter capacity to 75%. We focus on
+      server layout, as they are closer to the inlet [65].                                         this design as its balances normal and fail-over operation.
+         Using the data for the three months, we generate a model                                  Our findings extend to other redundancy models [34, 55].
+      for the temperature of each GPU 𝑔 in each server 𝑠:                                          Characterization. Prior works characterize the power pro-
+                                                                                                   file of GPU servers running LLMs [48, 49]. We complement
+                                ∀𝑠 ∈𝑆,𝑔∈𝐺 𝑇GPU 𝑠,𝑔 = 𝑓𝐺𝑃𝑈 𝑠,𝑔 (𝑇𝑖𝑛𝑙𝑒𝑡,𝑠 , LoadGPU ,𝑔 )       (2)   these studies with our own data focusing on power imbal-
+       Airflow. We measure the speed of the server fans when the                                   ances at datacenter scale. We study the same datacenters as
+       server is idle and when it is running at full load (i.e., all GPUs                          in the cooling section. For confidentiality, we normalize all
+       running heavy workloads). Then we run a few intermediate                                    values to the maximum power draw.
+       settings and interpolate a linear function. Our measurements                                GPU load and server power. We measure server power for both
+       match the manufacturer specs, which indicate an airflow of                                  A100 and H100 servers across various utilization levels and
+ ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                                                            Jovan Stojkovic et al.
+
+                 100                                         100                                               20                           P100                     1.0
+
+
+
+                                                                                                                                                   Max temperature
+                                                                                                                                            P99
+
+Power util (%)                                CDF rows (%)                                   Probability (%)
+                  75                                          75                                               15
+                  50                                          50                                               10                                                    0.9
+                  25       Row 1      Row 3                   25                       P50                      5
+                           Row 2      Row 4                                            P99                                                                           0.8
+                   0                                           0                                                0
+                       0 1 2 3 4 5 6 7                             0 25 50 75 100                                   60 70 80 90 100 110                                    0.8      0.9    1.0
+                           Time (day)                               Power utilization (%)                           Temperature (°C) Power (kW)                                  Max power
+   (a) Power utilization over 1-week.                        (b) Row power distribution.                                (a) VM placement.              (b) Temperature vs. power.
+
+ Figure 10. Power utilization timeline for four sample rows                                      Figure 11. Distribution of aisle peak GPU temperature and
+ and power across rows within a datacenter.                                                      row power with 100K random VM placements.
+
+
+ workloads (e.g., Figure 6). Server power is strongly correlated                                 3.1                GPU workload placement
+ with GPU load [48, 65]. Even when idle, servers consume
+                                                                                                 Cooling and power impact. To analyze the impact of GPU
+ significant power, similar to traditional CPU servers [39].
+                                                                                                 workloads on cooling and power infrastructure, we deploy 80
+ Besides GPU power, a substantial portion is drawn by fans,
+                                                                                                 VMs across two rows in a datacenter (Section 2) and generate
+ storage, memory, CPUs, and other components [48]. For
+                                                                                                 100K random placements across these two rows. Figure 11
+ each server 𝑠, we used polynomial regression to generate a
+                                                                                                 illustrates the distribution of peak server temperatures and
+ function 𝑓𝑝𝑜𝑤𝑒𝑟 (LoadGPU 𝑔,𝑠 ), which accounts for fan power
+                                                                                                 row power with these placements. The worst-case placement
+ and other components that also depend on load.
+                                                                                                 results in a maximum temperature exceeding 85°C, while a
+ Power imbalance across rows. Row power utilization is the                                       typical placement averages around 72°C. In terms of peak
+ aggregation and multiplexing of individual server power.                                        power, the worst-case placement increases peak power by
+ Figure 10 shows the power draw of four sample rows in a                                         27% over the optimal placement. If more intensive workloads
+ datacenter over a week. We see that the power draw has                                          are placed on hotter servers or if synchronous peak loads
+ significant variation across rows. We quantify this behavior                                    are co-located on the same row, the provider must provision
+ at scale in Figure 10, which shows the CDF of P50 and P99                                       sufficient cooling and power to support these extreme scenar-
+ power draw across 100 rows in a subset of our datacenters.                                      ios. Additionally, Figure 11b shows no correlation between
+ The figure shows a heavy tail pattern: 50%, 75%, and 90% of                                     maximum temperature and peak power for VM placements,
+ the rows draw 28%, 18%, and 10% less P99 power than the                                         indicating that cloud providers should consider both thermal
+ most power-hungry row, respectively.                                                            and power factors when placing VMs across the datacenter.
+    The high-power rows create hotspots in the datacenter,                                       Long-lived VMs. Figure 12a shows the lifetime of VMs run-
+ requiring sufficient power provisioning to meet the demands                                     ning GPU workloads. Most VMs are long-lived (e.g., over
+ of these rows. Thus, power allocated to lower-demand rows                                       60% run for more than two weeks). Since these VMs typically
+ is wasted, significantly hindering the cloud provider’s ability                                 occupy a full server, this implies that a given server may be
+ to safely oversubscribe. We define this as:                                                     dedicated to a workload for extended periods. Figure 12b
+                                                                                                 shows that 75% of servers host only one VM over the course
+               ∑︁
+    ∀Row∈𝐷𝐶         𝑃𝑜𝑤𝑒𝑟𝑠 (Load𝐺𝑃𝑈 ,𝑠 ) ≤ ProvPowerRow (4)
+                          𝑠 ∈𝑆 Row                                                               of a month. Figure 13a shows an example VM over a 4-week
+                                                                                                 period with a distinctly periodic diurnal load pattern. Aggre-
+ Insight #2: The power demands of GPU clusters present a                                         gated at row level (Figure 13b), the power consumption also
+ strong opportunity for power oversubscription. However,                                         shows a periodic pattern.
+ to safely oversubscribe, the infrastructure must effectively                                    Predictable load. We predict both row- and VM-power
+ manage the rows at the tail end that generate hotspots.                                         usage using a template-based approached derived from per-
+                                                                                                 row and per-customer VM power [68]. Using 4 weeks of
+ 3 Characterizing Opportunities in Thermal                                                       historical power data, we generate templates that capture
+   and Power Properties of GPU Workloads                                                         the average power at specific times of the day with 5-minute
+ To reason about the impact of GPU workloads on the thermal                                      granularity. Figure 14a shows that using different power tem-
+ and power properties in cloud datacenters, we (1) analyze                                       plates, row power prediction based on past history has less
+ the physical placement of GPU workloads at Microsoft Azure,                                     than 10% error for most row hours. A conservative predic-
+ (2) profile SaaS LLM inference workloads from a production                                      tion using P99 underestimates the power for less than 4% of
+ environment, and (3) characterize the thermal and power                                         the row×hours. For VM power prediction, cloud providers
+ properties of LLM inference varying a set of configurations                                     can leverage customer information, as shown in Figure 14b,
+ with open-source models [72].                                                                   with errors below 10% for more than 75% VM×hours and
+     TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms                                                            ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+                 100                                                    100                                                           100                                            100
+
+
+                                                        CDF servers (%)                                           CDF endpoints (%)
+                  75                                                     75                                                            75                                             75
+
+CDF VMs (%)                                                                                                                                                            CDF VMs (%)
+                  50                                                     50                                                            50                                             50
+                  25                                                     25                                                            25                                             25
+                   0                                                      0                                                             0                                              0
+                         0         7 14 21           28                            0      5 10 15 20                                         1      10      100 500                        1      10      100 500
+                                   Lifetime (days)                                     Number of VMs / server                                Number of VMs / endpoint                      Number of VMs / endpoint
+                         (a) GPU VM lifetimes.                (b) VMs per server over 1-month.                                              (a) Endpoint-based.                             (b) VM-based.
+
+                             Figure 12. How long VMs last over 1 month.                                                                     Figure 15. Number of VMs per SaaS endpoint.
+
+                      1.00                                             1.00
+                      0.75                                             0.75                                            provider [3, 5, 60, 61]. In all the datacenters across regions,
+
+Norm. load                                            Norm. power
+                      0.50                                             0.50                                            there is a significant portion of SaaS VMs. This allows for
+                                                                                                                       more flexible thermal and power shaping in the datacen-
+                      0.25                                             0.25                                            ter. Both SaaS and IaaS VMs are long-lived and their power
+                      0.00                                             0.00                                            consumption is periodic and predictable.
+                             0      7 14 21          28                            0       7 14 21          28
+                                     Time (days)                                            Time (days)               SaaS workloads. The SaaS offering in our A100 and H100
+                                 (a) VM load.                                          (b) Row power.                 datacenters serves multiple LLM inference endpoints, each
+                                                                                                                      hosting various LLMs for different applications [3, 57, 60, 70].
+     Figure 13. Normalized load over time for an example VM                                                           Each endpoint operates a dedicated set of VMs, which can
+     and power over time for an example row.                                                                          host multiple LLM inference instances, routing user infer-
+                                                                                                                      ence requests across these instances. Figure 15 shows the
+                      100                                                    100                                      distribution of VMs serving requests per SaaS inference end-
+
+
+
+
+CDF row x hours (%)                                     CDF VM x hours (%)
+                                                                                                                      point: 50% of the VMs belong to large endpoints with over
+                       75                                                     75
+                                                                                                                      100 VMs spanning across multiple rows.
+                       50 overpredict underpredict                            50
+                                                                                                          P50         Load balancing. Cloud platforms traditionally use VM place-
+                       25                                                     25                          P90         ment algorithms based on allocation rules that are power-
+                                                                                                          P99
+                        0                                                      0                                      and thermal-oblivious [21]. On top of this setup, our SaaS
+                            15        0         15                                      50        0          50       implementation schedules LLM inference requests across
+                             Percentage error (%)                                        Percentage error (%)
+                                                                                                                      VMs to improve latency and throughput [1, 30, 82]. How-
+                                 (a) Row-based.                                    (b) Customer-based.                ever, these VMs may reside in rows with different thermal
+                                                                                                                      and power characteristics (e.g., Figure 10). If the Load Bal-
+     Figure 14. CDF of the row- and customer-based power draw                                                         ancer is unaware of temperature conditions, it may assign
+     prediction error with different power templates.                                                                 equal workloads to servers that are already near thermal
+                                                                                                                      throttling. Similarly, disregarding power conditions could
+     underpredictions between 2-7% for P90 and P99 templates.                                                         result in sending additional load to VMs in rows with high
+     These further demonstrate the predictability of row- and                                                         power demand from neighboring IaaS servers, exacerbating
+     VM-level power consumption.                                                                                      power strain.
+     Insight #3: Cloud operators can leverage workload hetero-                                                         Insight #4: Cloud operators can leverage the flexibility of SaaS
+     geneity and predictability for intelligent workload placement                                                     LLM inference workloads for thermal- and power-aware
+     to relieve hotspots and smooth out thermal/power spikes.                                                          request routing to maximize oversubscription opportunities.
+
+     3.2                 LLM inference routing                                                                         3.3              LLM inference instance configuration
+     IaaS vs SaaS. Microsoft Azure hosts a variety of GPU work-                                                       As outlined in Table 1, LLM inference servers have various
+     loads, which we categorize as either IaaS or SaaS. IaaS uses                                                     configuration options that balance thermal/power require-
+     opaque VMs [6, 13, 58, 59], allowing customers to run any                                                        ments, performance, and result quality. To evaluate these op-
+     workload (e.g., inference, training, fine-tuning) for any model                                                  tions, we run Llama2 [72] inference workloads on an NVIDIA
+     (e.g., LLM, diffusion, image recognition). IaaS VMs accom-                                                       DGX A100 server [46]. LLM inference consists of two distinct
+     modate diverse workloads, with limited visibility into their                                                     phases [49]: the prefill (i.e., prompt) phase, which processes
+     characteristics, making them variable and hard to predict.                                                       the entire prompt in parallel, and the decode phase, which
+     On the other hand, SaaS is fully managed by the cloud                                                            generates each output token sequentially.
+   ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                               Jovan Stojkovic et al.
+
+           95                               95                                           TP8    (i.e., reducing temperature or power), the system needs to
+
+
+GPU Temp (°C)                    Mem Temp (°C)
+                                                                           3             TP4
+
+                                                                  Power (kW)
+           70                               70                                           TP2
+                                                                                                take different actions.
+                                                                           2                    Batch size. Figure 16b shows the temperature and power with
+           45                               45                             1                    different batch sizes: 64, 16 and 1 [81]. With smaller batch
+           20 Prefill                       20 Prefill                     0 Prefill            sizes, the computational intensity decreases, and the tem-
+                        Decode                           Decode                        Decode   perature and power go down. However, during the decode
+                             (a) Tensor parallelism [63].                                       phase, as GPUs need to more frequently fetch the data from
+           95                               95                                                  memory via the memory controller (instead of bulk trans-
+                                                                                          64
+
+
+GPU Temp (°C)                    Mem Temp (°C)
+                                                                           3              16    fers), the memory temperature increases. Thus, depending
+
+                                                                  Power (kW)
+           70                               70                                            1     on the bottleneck (temperature or power) and the workload’s
+                                                                           2
+           45                               45                                                  phase (prompt or decode), the system may decide to choose
+                                                                           1                    different batch sizes.
+           20 Prefill   Decode              20 Prefill   Decode            0 Prefill   Decode   Model size. Figure 16c shows the power consumption and
+                                           (b) Batch size [81].                                 temperature associated with different Llama2 [72] model
+                                                                                                sizes: 70B, 13B, and 7B. As the model size decreases, the
+           95                               95                                           70B    computational intensity of inference reduces significantly,
+
+
+GPU Temp (°C)                    Mem Temp (°C)
+                                                                           3             13B
+
+                                                                  Power (kW)
+           70                               70                                           7B     resulting in lower power draw and temperature. However,
+                                                                           2                    smaller models tend to produce results of lower quality [37].
+           45                               45                             1                    For example, the 7B model reduces result quality by 30-40%
+           20 Prefill                       20 Prefill                     0 Prefill            compared to the 70B model [7, 72].
+                        Decode                           Decode                        Decode
+                                                                                                Model quantization. We observe a similar behavior with quan-
+                            (c) Llama2 model sizes [72].                                        tized model: lower precision leads to reduced temperature
+                                                                                                and power while decreasing the accuracy by 2-20% [7, 33, 37].
+   Figure 16. Temperature and power of a server running prefill                                 Because both smaller and quantized models generally lead
+   and decode phases varying configuration parameters.                                          to reduced quality, the system must carefully manage the
+                                                                                                proportion of the load directed to different model variants
+                                                                                                to uphold average per-service quality SLOs.
+   Impact of configuration parameters. In Figure 16, we                                         Thermal and power space. We quantify the performance
+   quantify the impact of each parameter individually: GPU                                      of an LLM inference server in terms of its goodput (i.e., the
+   frequency, parallelism, batch size, model size, and quantiza-                                number of tokens processed per second while staying within
+   tion. The red line represents the maximum temperature and                                    TTFT and TBT SLOs, defined as 5× the execution time on an
+   power (TDP), while the blue line shows the idle conditions.                                  unloaded system [36, 85]). Figure 17 illustrates the trade-off
+                                                                                                between temperature/power and goodput across all configu-
+   GPU frequency. Lowering the frequency reduces both tem-
+                                                                                                rations (i.e., GPU frequency, parallelism, batch size, model
+   perature and power of the GPU. Prompt phases are more
+                                                                                                size, and quantization). Goodput is normalized to the fastest
+   sensitive to GPU frequency [48, 67]. Although reducing the
+                                                                                                configuration for the smallest model (i.e., Llama2-7B), while
+   frequency has a lower impact on temperature and power
+                                                                                                temperature and power are normalized to the fastest con-
+   than other configuration parameters, it does not affect the
+                                                                                                figuration with the highest accuracy (i.e., Llama2-70B). The
+   quality of results and can be applied instantaneously due to
+                                                                                                figure highlights the impact of the model size as it affects
+   its relatively low overhead.
+                                                                                                quality. Each model exhibits a Pareto frontier representing
+   Model parallelism. We focus on tensor parallelism [63] be-                                   configurations that minimize temperature and power with
+   cause other parallelisms like data and pipeline parallelism are                              minimal impact on performance.
+   not as effective for LLM inference within a single server [49].                              Insight #5: Cloud operators can effectively shape thermal
+   Figure 16a shows the temperature and power of a server run-
+                                                                                                and power while minimally impacting LLM inference per-
+   ning prompt and decode phases varying tensor parallelisms:
+                                                                                                formance and results quality by configuring SaaS instances.
+   TP8, TP4, and TP2 [63] (i.e., powers of two with the number
+   of KV heads [72]). With TP2, the total server power reduces
+                                                                                                4   TAPAS Design
+   as we use fewer GPUs. However, as the same amount of
+   work is concentrated in fewer GPUs, the per-GPU power in-                                    Architecture. Based on our insights, we propose TAPAS, a
+   creases. Hence, the temperature of the hottest GPU increases.                                framework for thermal and power management in GPU clus-
+   Lower parallelism impacts power more significantly during                                    ters for cloud environments. TAPAS is specifically designed
+   prompt phase and temperature during decode phase. Thus,                                      to address the unique properties and challenges of LLM
+   depending on the workload’s phase and the target metric                                      inference workloads. TAPAS enhances cooling and power
+    TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms                                      ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+
+              1.0     70B         13B        7B                                                                a server (i.e., less than one week), we assume peak load
+
+
+Norm. temp
+              0.9                                                                                              conditions. We then estimate the load of the new VM based
+              0.8                                                                                              on the load from VMs associated with (1) the same user for
+              0.7                                                                                              IaaS workloads and (2) the same endpoint for SaaS workloads.
+                                                                                                               Again, we assume peak load if historical data is insufficient.
+              0.6
+              1.0                                                                                              We estimate the new peak airflow for each aisle and power
+              0.8                                                                                              demand for each row if the VM were to be placed, and we
+
+Norm. power
+              0.6                                                                                              filter out servers in aisles or rows that would exceed airflow
+              0.4                                                                                              or power limits (Equations (3) and (4)).
+              0.2                                                                                              Placing hotter IaaS VMs in cooler servers. As fine-grained
+              0.0 1.0              0.8             0.6       0.4                       0.2               0.0   control over IaaS VMs is limited, we prioritize placing them
+                                                  Norm. goodput                                                on cooler servers to minimize the risk of thermal throttling,
+                                                                                                               ensuring server temperature stays within safe limits even un-
+    Figure 17. Normalized temperature and power (lower is                                                      der high IaaS load. For each server, we feed historical server
+    better) and goodput (higher is better) of Llama2 [72] with all                                             inlet temperatures and predicted VM loads into Equation (2)
+    configuration parameters highlighting the model size.                                                      to estimate peak GPU temperatures and select servers with
+                                                                                                               the lowest projected temperatures. We attempt to place SaaS
+                                                      Proﬁles                                                  VMs in warmer servers, as we can adjust the configuration
+                                              TGPU    Toutside   PowerGPU        PowerServer   AirﬂowAisle
+                    LLM
+                Temp/Power
+                           DC layout
+                                                                                                               of such instances during emergency events, while ensuring
+                                             Tinlet   LoadDC      LoadGPU        PowerRow      AirﬂowServ
+                               Proﬁle used for                                       Oﬄine proﬁling
+                                                                                                               that the maximum GPU temperature constraints will not be
+                               decision-making                                 Aisle2N                         violated based on the predicted load for that endpoint.
+                                                                              Aisle
+                                                                             Aisle 1
+                IaaS/SaaS VM                   VM                                                              Balancing IaaS and SaaS. To enable SaaS workloads to
+                                                         Row 1                      Row 2
+                  crea�ons         VM       Placement
+                                                                                                               balance airflow and power to reduce peaks, it is important
+                                Allocator                        SaaS-B     IC            IaaS-2
+     SaaS/IaaS                                                     …                        …                  to achieve a good balance of IaaS and SaaS workloads within
+     Operator
+                             SaaS Frontends
+                                                                 IaaS-1                  SaaS-C     IC         each aisle and row. We aim to place new VMs in an aisle
+                                EndpointBC                        Idle                   SaaS-A                and row that will not result in an excessive concentration of
+                               Endpoint
+                    LLM
+                              Endpoint A                       SaaS-A                   Instance               either IaaS or SaaS VMs.
+                 Inference       Load                         Instance                Conﬁgurator
+                               Balancer                     Conﬁgurator                   IaaS-3
+                                                                                                               Migration. Beyond initial VM placement, we can recalculate
+    SaaS User                                                                                                  better placements and migrate VMs to address mispredic-
+                                            SaaS-A request rou�ng among instances
+                                                                                                               tions or changes in workload behavior. For SaaS workloads,
+                                                                                                               we can create a new VM, transfer the workload, and then
+                      Figure 18. TAPAS architecture overview.
+                                                                                                               decommission the old VM. However, for IaaS VMs, migration
+                                                                                                               must be seamless and non-disruptive [12]. Currently, live
+    oversubscription capabilities while effectively managing in-                                               migration of GPU VMs is unsupported due to the complexi-
+    frastructure failures, thereby reducing datacenter TCO with                                                ties of GPU memory management, but this capability would
+    minimal impact on workload performance or result quality.                                                  enhance performance if implemented.
+    The system leverages the adaptability of SaaS workloads
+    without impacting IaaS workloads.                                                                          4.2   Request Routing
+       Figure 18 overviews the architecture. TAPAS (1) extends                                                 Once we place workloads in servers, TAPAS leverages multi-
+    existing components of conventional cloud LLM inference                                                    instance SaaS endpoints to further smooth temperature and
+    clusters (e.g., per-cluster VM Allocator and per-endpoint Load                                             power draw through finely routing LLM inference requests.
+    Balancer), (2) introduces a per-SaaS VM Instance Configura-                                                We consider three constraint levels: aisle, row, and server.
+    tor, and (3) maintains multiple Profiles. To achieve its goals,                                            Aisle. For each aisle, TAPAS estimates the load on each
+    TAPAS focuses on three core aspects: VM placement, LLM                                                     server and calculates the total airflow demand for the VMs in
+    inference request routing, and instance configuration.                                                     that aisle. This information is cached and recalculated every 5
+                                                                                                               minutes, updating whenever discrepancies are detected (e.g.,
+    4.1          Workload placement                                                                            if a server’s power consumption is higher than estimated).
+    As VMs arrive, the VM Allocator assigns each new VM (whether                                               TAPAS then prevents routing requests to VMs that could
+    IaaS or SaaS) to a server, aiming to meet workload demands                                                 trigger an airflow violation.
+    while minimizing the risk of thermal or power hotspots.                                                    Row. Similarly to aisles, TAPAS estimates the load for all
+    Aisle and row filtering. Using historical server load data,                                                servers in a row and aggregates these into a total power
+    we predict the peak airflow requirements for each aisle and                                                value. It then assesses whether routing requests to VMs in
+    peak power demand for each row. If data is insufficient for                                                that row would risk exceeding the peak power limit.
+ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                      Jovan Stojkovic et al.
+
+
+Server. TAPAS tracks the current load and, using Equa-             with an estimated workload to assess cooling and power
+tion (2), estimates whether the GPU temperature for each           requirements, enabling more precise provisioning.
+server will exceed the threshold. It avoids routing requests       Failure management. If there is a cooling or power fail-
+to VMs on servers with a high risk of overheating.                 ure, TAPAS recalculates the new available airflow for each
+                                                                   aisle, the power for each row, and the inlet temperature for
+4.3   Instance configuration                                       each server. Based on this, the request routing will steer
+To ensure servers remain within cooling and power lim-             requests away from constrained servers. In addition, the In-
+its during load spikes or emergency events, TAPAS calcu-           stance Configurator will decrease the load accordingly. If all
+lates the maximum allowable airflow, GPU temperature, and          these actions are not enough, TAPAS applies regular power
+server power for each instance. Based on these limits, the         capping techniques to the IaaS VMs [48].
+Instance Configurator leverages the thermal and power pro-
+                                                                   4.5   Implementation
+files of the LLM from Figure 17 to determine the optimal
+GPU frequency, batch size, model parallelism, quantization,        Profiles. TAPAS includes an offline profiling phase that
+and model size that maximize goodput without quality im-           takes place during the initial stages of datacenter deploy-
+pact. It identifies configurations that, given the current load,   ment, when operators run benchmarks and validation tests.
+satisfy performance SLOs while staying within power/ther-          This phase models: (1) the datacenter layout, (2) the inlet
+mal budgets. It predicts TTFT/TBT latencies, power draw,           temperature of each server, (3) the temperature of each GPU,
+and temperature for each, selecting the highest-accuracy,          (4) the server fan airflow, and (5) the power-load for the
+highest-performance configuration within budgets.                  servers. In addition, when the provider onboards a new LLM,
+   Profiling a SaaS LLM service takes 3-4h to generate the         TAPAS profiles the impact of each configuration parameter
+configuration space and is performed only when a new model         in that hardware, following the process described in Sec-
+is registered with TAPAS. Datacenter organization profiling        tion 3. During regular datacenter operation, TAPAS refines
+occurs once during deployment. Both profiling overheads are        these models on a weekly basis. During this weekly update,
+negligible compared to the lifetime of an LLM or datacenter.       TAPAS collects power and load patterns for each server and
+   All configuration knobs (e.g., GPU frequency or model           row to predict their utilization. We use a template-based
+parallelism) are available with the LLM inference engine. The      approach that leverages data from the previous week [68].
+configurator communicates with the engine, which accepts           We make these models and profiles available to the other
+the messages and adjust its configuration dynamically. All         three main components through regular data updates.
+knob values are set such that service’s SLO is always met.         VM Allocator. We implement our workload placement poli-
+   During online decision making, TAPAS accounts for the           cies in a rule-based VM Allocator, inspired by Protean [21],
+time required to reassign these settings and prevent requests      using three main rules: (1) a validator rule filters aisles and
+from being sent to instances during transitions [69]. For ex-      rows based on peak airflow and power; (2) a preference rule
+ample, changing the model parallelism, size, or quantization       directs IaaS workloads to cooler servers and SaaS workloads
+level requires reloading the model, which can take a few           to warmer servers. For this rule, we categorize servers into
+seconds. Given these overheads and the goal of maximizing          three equally sized groups: cold, medium, and warm; and (3)
+quality, adjustments to model size and quantization are typ-       another preference rule guides VM placement based on the
+ically the last resort. Specifically, SaaS instances switch to     IaaS/SaaS balance, grouping servers into three categories:
+lower-accuracy models only when power/thermal headroom             IaaS-heavy, SaaS-heavy, and balanced. These rules use cur-
+in their rows is insufficient. The configurator first adjusts      rent cluster data and the weekly updated models and profiles.
+performance knobs and selects the highest-accuracy model           Finally, our VM Allocator applies these rules to select the
+that fits within the power/thermal headroom without violat-        final server to host the GPU VM.
+ing performance SLOs. On the other hand, TAPAS does not            Load Balancer. We deploy the SaaS endpoints on a dedi-
+alter the accuracy of IaaS instances.                              cated set of VMs that expose an HTTP REST interface. These
+                                                                   VMs implement the Load Balancer, which forwards LLM in-
+4.4   Oversubscription and failures                                ference requests to the appropriate VM within the endpoint.
+                                                                   For each VM, TAPAS evaluates the current VM state along
+Oversubscription. Using TAPAS, we can reduce the cooling           with the server’s thermal and power profiles to calculate
+and power requirements needed to run the same workload.            the probability of violating any of the three operational lim-
+When the cloud provider initially provisions cooling and           its (i.e., thermal, power, and performance). Requests are not
+power for the datacenter, it typically plans for peak baseline     routed to VMs with a high risk of violation.
+demand. As demand increases, the cloud operator can add               After the filtering step, TAPAS applies state-of-the-art load
+more racks to the existing rows, utilizing the slack created       balancing policies in the following order: (1) route requests
+by TAPAS. Additionally, our TAPAS simulator can be used            to instances that have previously handled requests from the
+TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms                            ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+
+same customer to maximize KV cache reuse [17, 66, 77]; (2)                                  1.0
+
+
+
+                                                                         Norm. peak power
+concentrate load to reduce energy consumption [69]; and (3)                                 0.8
+distribute requests across VMs to optimize performance.                                     0.6
+                                                                                            0.4
+Instance Configurator. To run the local LLM instances, we                                                    Baseline
+                                                                                            0.2              TAPAS
+use vLLM [27], a state-of-the-art LLM inference platform.
+Note that TAPAS can also integrate with other platforms (e.g.,                              0.0
+                                                                                                       0         10        20         30       40       50       60
+TensorRT-LLM [47]) with only minor interface modifications.                                                                     Time (minutes)
+The LLM inference engine provides an HTTP REST API that                       Figure 19. Peak power over 1-hour for Baseline and TAPAS
+receives requests from the Load Balancer.                                     while running real cluster experiments.
+   The local TAPAS controller receives the updated thermal
+and power profiles for that server on a weekly basis. This con-                             1.0
+
+
+
+
+                                                                                                                                                                      Max temperature (°C)
+                                                                         Norm. peak power
+troller runs for every LLM iteration to estimate the optimal                                0.8                                                                  90
+operational settings (including GPU frequency, batch size,                                  0.6
+                                                                                                                                                                 70
+model parallelism, model size, and quantization). These com-                                0.4
+putations are lightweight and cached for efficiency. If needed,                             0.2                                                                  50
+                                                                                                             Baseline         TAPAS
+the controller updates the settings for each instance running                               0.0                                                                  30
+on the VM. It also restarts the LLM instance if changes to                                         0          1       2      3      4        5      6        7
+model parallelism, model size, or quantization are necessary.                                                               Time (days)
+                                                                              Figure 20. Peak power and maximum temperature over 1-
+4.6   Generalizing TAPAS                                                      week for Baseline and TAPAS for large-scale simulations.
+The design principles of TAPAS can be applied to other
+classes of workloads. While SaaS VMs can run any work-                        Real cluster. We conduct real experiments using a scaled-
+load, TAPAS components may require adjustments. For ex-                       down version of the production trace, emulating two rows
+ample, the Instance Configurator would need to be trained                     of 80 A100 servers with a 50/50 IaaS/SaaS mix over one hour.
+differently and use configuration knobs tailored to specific                  For IaaS, we use historical power readings directly without
+workloads. In contrast, IaaS workloads are already treated                    modifying the workloads besides VM placement across rows.
+as opaque-boxes in TAPAS, allowing them to run different                      For SaaS, we collect LLM inference invocation traces across
+workload types without requiring any changes in the system.                   endpoints and replay the traces using Llama2 models [72].
+   Similarly, our insights can be applied to diverse datacen-                 Simulation. To evaluate TAPAS at scale and compare poli-
+ter infrastructures. Our analysis includes three datacenters                  cies under consistent conditions, we built a discrete-time
+from organizations with distinct characteristics. The pre-                    simulator that models our datacenters as described in Sec-
+diction models need to use datacenter-specific regression                     tion 2. This simulator replicates the load of IaaS VMs and
+functions, which vary based on the organization, the phys-                    the execution of LLM inference requests in SaaS VMs.
+ical placements of servers within the datacenter, and the                        For cooling modeling, we use Equations (1) to (3). We eval-
+cooling mechanisms (e.g., liquid vs. air cooling).                            uated various regression models, including random forests,
+                                                                              multi-layer perceptrons, linear, polynomial, and piecewise
+5     Evaluation                                                              polynomial regressions. Piecewise polynomial achieved an
+5.1   Methodology                                                             MAE of <1°C, offering fast computation, efficient storage,
+                                                                              and effective generalization for unseen values (e.g., random
+Policies. As a Baseline, we use a thermal- and power-oblivious                forests tend to overfit and struggle to predict temperatures
+system with traditional VM placement [21] and LLM re-                         lower than those in the training set). These models simu-
+quest routing [1] without any reconfiguration. We imple-                      late server temperatures based on IaaS power data and LLM
+ment TAPAS as detailed in Section 4.5 and evaluate six addi-                  inference requests for SaaS.
+tional variations to assess the impact of each component, as                     For power, the simulator uses real IaaS power readings and
+well as their combinations, on VM placement (Place), request                  maps inference load to power consumption for each SaaS VM
+routing (Route), and instance configuration (Config).                         (Equation (4)). It also tracks capping events by simulating
+Workload. For VM arrivals, we use a one-week production                       their impact on both cooling and power infrastructure.
+trace from one of the A100 datacenters [46] with a 50/50 split
+                                                                               5.2                TAPAS operation
+between IaaS and SaaS workloads. This covers around one
+thousand servers with thousands of GPUs. For SaaS LLM                         Real cluster. Figure 19 shows the peak row power for the 80
+inference, we use Llama2 [72] with the profile from Figure 17.                servers in the two rows measured at 1-minute intervals com-
+The requests are a subset from 10 endpoints, each with a VM                   paring the Baseline and TAPAS. During regular operations,
+count between 23 and 100 (Figure 15b).                                        TAPAS effectively reduces peak power, maintaining latency
+     ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                        Jovan Stojkovic et al.
+
+
+                  1.0          Baseline      Place       Route         Config    Place+Route       Place+Config         Route+Config          TAPAS
+
+
+Max temperature
+                  0.8
+                  0.6
+                  0.4
+                  0.2
+                  0.0
+                  1.0
+                  0.8
+
+Peak power
+                  0.6
+                  0.4
+                  0.2
+                  0.0           SaaS                      75/25                   50/50                       25/75                        IaaS
+       Figure 21. Normalized maximum temperature and peak power varying the policy and fraction of SaaS and IaaS workloads.
+
+                  100    Thermal Baseline                                                           Power Emergency             Thermal Emergency
+                         Power Baseline
+
+Capped (%)
+                                                                                                  Baseline     TAPAS           Baseline     TAPAS
+                   10    Thermal TAPAS                                                          IaaS SaaS IaaS SaaS          IaaS SaaS IaaS SaaS
+                         Power TAPAS
+                    1                                                                  Perf     -35%   -28%    0%     +16%   -22%   -19%      0%      +10%
+                                                                                      Quality    0%     0%     0%     -12%    0%     0%       0%       -6%
+
+                        None        10       20        30         40        50       Table 2. Comparison of Baseline and TAPAS in power and
+                                    % of datacenter oversubscription                 thermal emergencies across IaaS and SaaS
+     Figure 22. Time spent under thermal and power capping
+     varying the oversubscription ratio for Baseline and TAPAS.                      TAPAS’s effectiveness is limited to VM placement. Con-
+                                                                                     versely, TAPAS achieves maximum reductions in temper-
+     SLOs and result quality, achieving a 20% reduction in peak                      ature (23%) and power (28%) compared to the Baseline when
+     utilization compared to Baseline. This experiment shows a                       the workload is entirely SaaS, due to its flexibility.
+     4% absolute error compared to the simulation, validating the                    5.3   Oversubscription
+     accuracy of our simulator.
+                                                                                     We analyze the effectiveness of TAPAS in scenarios where
+     Simulation. Extending to large-scale simulations, Figure 20                     the thermal and power infrastructures are oversubscribed.
+     shows the maximum temperature and row power over 5-                             Figure 22 shows the fraction of time during which thermal
+     minute intervals for one week. Compared to Baseline, TAPAS                      and power capping occurs as racks are added to the data-
+     reduces the maximum temperature by 15% and peak power                           center. As expected, a datacenter without oversubscription
+     by 24%, all without hurting result quality.                                     (None) experiences no capping due to thermal or power con-
+     Ablation study. Figure 21 shows the maximum temperature                         straints under Baseline and TAPAS. However, as additional
+     (top) and peak power (bottom) for the Baseline and variations                   servers are added, the Baseline quickly begins to experience
+     of TAPAS over one week, normalized to the maximum provi-                        capping events, especially once oversubscription exceeds
+     sioned values (indicated by the black lines). Importantly, all                  20%. In contrast, TAPAS supports up to 40% more servers
+     policies operate without affecting quality or causing SLO vio-                  without impacts on quality of results while maintaining ther-
+     lations under normal conditions. For a 50/50 mix of IaaS/SaaS                   mal and power capping below 0.7% of the time, enabling safe
+     workloads (middle), each individual policy reduces both tem-                    thermal and power oversubscription.
+     perature and power by up to 12% compared to the Baseline,
+     achieving these reductions by balancing or lowering the lo-                     5.4   Failure management
+     cal load. Place performs slightly better, as it balances both                   In the event of thermal (AHU) or power (UPS) failures, data-
+     IaaS and SaaS workloads across rows, while Route and Config                     centers must immediately adapt to reduced capacity limits of
+     focus on optimizing only SaaS workloads. Although combin-                       90% and 75%, respectively. Table 2 compares the performance
+     ing two components yields additional improvements, TAPAS                        and quality impact on Baseline and TAPAS over a 5-minute
+     achieves the largest reductions in temperature and power                        peak load period. As precise IaaS performance impact is chal-
+     (17% and 23%, respectively) through a holistic approach that                    lenging to measure, we present the effects on both IaaS and
+     integrates placement, routing, and configuration.                               SaaS workloads as the percentage of frequency capped rela-
+     Sensitivity to IaaS/SaaS fraction. Figure 21 shows the                          tive to maximum frequency, adjusted by the fraction of work-
+     maximum temperature and power varying the SaaS/IaaS                             loads affected. To stay within constraints, Baseline applies
+     fractions. As expected, when the workload is entirely IaaS,                     uniform frequency caps up to 35% across servers, leading
+TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms       ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+
+to significant performance drops. In contrast, TAPAS main-                TAPAS maximizes cooling and power efficiency with mini-
+tains (or even improves) performance with up to 12% quality               mal quality impact, effectively reducing thermal/power peaks,
+impact (i.e., accuracy drop by number of requests directed                supporting oversubscription, and handling failures.
+to smaller models). TAPAS effectively manages temperature
+and power through selective actions, such as routing requests             Acknowledgments
+to smaller models only when necessary.                                    We thank the anonymous reviewers and our shepherd, Lingjia
+                                                                          Tang, for their valuable feedback and constructive sugges-
+6    Related work                                                         tions that helped improve this paper. Jovan Stojkovic and
+                                                                          Josep Torrellas were partially supported by NSF under grants
+Datacenter cooling management. Researchers [18, 20, 25,
+                                                                          CNS 1956007, CCF 2107470, and CCF 2316233.
+38, 43, 50] proposed adaptive cooling systems to address
+thermal hotspots and enhance cooling efficiency through op-
+                                                                          References
+timized thermal control with various technologies (e.g., warm
+                                                                           [1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun
+water [50], immersion-cooling [43], and free-cooling [20]).                    Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ram-
+CoolProvision [38] optimizes under-provisioned cooling while                   jee. Taming Throughput-Latency Tradeoff in LLM Inference with
+maintaining performance. Instead, TAPAS reduces hotspots                       Sarathi-Serve. In 18th USENIX Symposium on Operating Systems De-
+in LLM inference clusters through VM placement, request                        sign and Implementation (OSDI), 2024.
+routing, and instance configuration.                                       [2] Paula Aguilera, Jungseob Lee, Amin Farmahini-Farahani, Katherine
+                                                                               Morrow, Michael Schulte, and Nam Sung Kim. Process variation-
+Thermal-aware scheduling. Prior work optimizes data-                           aware workload partitioning algorithms for GPUs supporting spatial-
+center job placement to reduce thermal issues [10, 11, 29,                     multitasking. In DATE, 2014.
+62, 64, 73]. For example, RT-TAS [29] proposes a thermally-                [3] Google AI. Gemini API Developer Docs. https://ai.google.dev/gemini-
+                                                                               api/docs, 2024.
+balanced task-to-core assignment for integrated GPU-CPU                    [4] Keivan Alizadeh, Iman Mirzadeh, Dmitry Belenko, Karen Khatamifard,
+platforms while PTDS [11] optimizes VM-to-host scheduling                      Minsik Cho, Carlo C Del Mundo, Mohammad Rastegari, and Mehrdad
+to prevent hotspots and reduce cooling energy. However,                        Farajtabar. LLM in a flash: Efficient Large Language Model Inference
+traditional thermal- or power-aware scheduling approaches                      with Limited Memory. arXiv preprint arXiv:2312.11514, 2024.
+yield suboptimal results in LLM serving due to their unique                [5] Azure. Azure Machine Learning - ML as a Service. https://azure.
+                                                                               microsoft.com/en-us/products/machine-learning/, 2024.
+challenges, as discussed in Section 3.                                     [6] Microsoft Azure. ‘ND’ sub-family GPU accelerated virtual machine
+Datacenter power management. To improve datacenter                             size series. https://learn.microsoft.com/en-us/azure/virtual-machines/
+                                                                               sizes/gpu-accelerated/nd-family, 2024.
+power utilization, Flex [83] safely oversubscribes reserved
+                                                                           [7] Hicham Badri and Appu Shaji. Half-quadratic quantization of large
+power through offline workload placement and online load                       machine learning models, November 2023.
+shedding. SmartOClock [68] distributes power budgets effi-                 [8] Luiz André Barroso, Jimmy Clidaras, and Urs Hölzle. The Datacenter as
+ciently through power predictions for workload-aware over-                     a Computer: An Introduction to the Design of Warehouse-Scale Machines.
+clocking. SmoothOperator [22] spreads services with syn-                       Springer, 2013.
+                                                                           [9] Jairus Bowne. Using Large Language Models in Learning and Teach-
+chronous power patterns evenly across the datacenter to
+                                                                               ing. https://biomedicalsciences.unimelb.edu.au/study/dlh/assets/
+reduce peak power draw. TAPAS contributes to power uti-                        documents/large-language-models-in-education/llms-in-education,
+lization improvement focusing on LLM inference clusters.                       2024.
+                                                                          [10] Muhammad Tayyab Chaudhry, Teck Chaw Ling, Atif Manzoor,
+LLM serving. Recent works explore unique GPU and LLM
+                                                                               Syed Asad Hussain, and Jongwon Kim. Thermal-aware scheduling in
+serving characteristics [56, 65, 67], challenges [35], and op-                 green data centers. ACM Computing Surveys, 47(3), feb 2015.
+portunities [69] for power and energy. POLCA [48] intro-                  [11] Rui Chen, Bo Liu, WeiWei Lin, JianPeng Lin, HuiWen Cheng, and
+duces a power oversubscription framework for LLM infer-                        KeQin Li. Power and thermal-aware virtual machine scheduling opti-
+ence clusters. 𝜇-Serve [53] enables power-aware LLM serving                    mization in cloud data center. Future Generation Computer Systems,
+                                                                               145:578–589, 2023.
+through model parallelism and predictive request schedul-
+                                                                          [12] Christopher Clark, Keir Fraser, Steven Hand, Jacob Gorm Hansen, Erik
+ing. Other LLM serving optimizations orthogonal to TAPAS                       Jul, Christian Limpach, Ian Pratt, and Andrew Warfield. Live Migration
+include key-value cache management [27], continuous batch-                     of Virtual Machines. In Proceedings of the Symposium on Networked
+ing [81], scheduling [54, 78], autoscaling [26], prefill-decode                Systems Design and Implementation (NSDI), 2005.
+interference reduction [1, 49, 85], hardware heterogeneity [49,           [13] Google Cloud. GPU machine types. https://cloud.google.com/
+                                                                               compute/docs/gpus/, 2024.
+75, 76, 80], and geographical load balancing [31].
+                                                                          [14] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher
+                                                                               Ré. FlashAttention: Fast and Memory-Efficient Exact Attention with
+7    Conclusions                                                               IO-Awareness. arXiv preprint arXiv:2205.14135, 2022.
+We introduced TAPAS, a system for thermal- and power-                     [15] Hafiz M Daraghmeh and Chi-Chuan Wang. A review of current status
+                                                                               of free cooling in datacenters. Applied Thermal Engineering, 114:1224–
+aware scheduling of LLM inference in GPU datacenters,                          1239, 2017.
+leveraging VM placement, request routing, and instance                    [16] Energy.gov.        Evaporative Coolers.      https://www.energy.gov/
+configuration, while maintaining performance and quality.                      energysaver/evaporative-coolers, 2024.
+ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                           Jovan Stojkovic et al.
+
+
+[17] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic,         [33] Shiyao Li, Xuefei Ning, Luning Wang, Tengxuan Liu, Xiangsheng Shi,
+     Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. Cost-Efficient             Shengen Yan, Guohao Dai, Huazhong Yang, and Yu Wang. Evaluating
+     Large Language Model Serving for Multi-turn Conversations with                 quantized large language models. arXiv preprint arXiv:2402.18158,
+     CachedAttention. In USENIX Annual Technical Conference (USENIX                 2024.
+     ATC), 2024.                                                               [34] Yang Li, Charles R Lefurgy, Karthick Rajamani, Malcolm S Allen-Ware,
+[18] Hanfei Geng, Yi Sun, Yuanzhe Li, Jichao Leng, Xiangyu Zhu, Xianyuan            Guillermo J Silva, Daniel D Heimsoth, Saugata Ghose, and Onur Mutlu.
+     Zhan, Yuanchun Li, Feng Zhao, and Yunxin Liu. TESLA: Thermally                 A scalable priority-aware approach to managing data center server
+     Safe, Load-Aware, and Energy-Efficient Cooling Control System for              power. In Proceedings of the IEEE International Symposium on High
+     Data Centers. In ICPP, 2024.                                                   Performance Computer Architecture (HPCA), 2019.
+[19] GitHub. The world’s most widely adopted AI developer tool. https:         [35] Yuzhuo Li, Mariam Mughees, Yize Chen, and Yunwei Ryan Li. The
+     //github.com/features/copilot, 2024.                                           Unseen AI Disruptions for Power Grids: LLM-Induced Transients.
+[20] Íñigo Goiri, Thu D. Nguyen, and Ricardo Bianchini. CoolAir:                    arXiv preprint arXiv:2409.11416, 2024.
+     Temperature- and Variation-Aware Management for Free-Cooled Dat-          [36] Zhuohan Li, Lianmin Zheng, Yinmin Zhong, Vincent Liu, Ying Sheng,
+     acenters. In Proceedings of the 20th International Conference on Archi-        Xin Jin, Yanping Huang, Zhifeng Chen, Hao Zhang, Joseph E. Gonzalez,
+     tectural Support for Programming Languages and Operating Systems               and Ion Stoica. AlpaServe: Statistical Multiplexing with Model Paral-
+     (ASPLOS), 2015.                                                                lelism for Deep Learning Serving. In Proceedings of the Symposium on
+[21] Ori Hadary, Luke Marshall, Ishai Menache, Abhisek Pan, Esaias E                Operating Systems Design and Implementation (OSDI ’23), 2023.
+     Greeff, David Dion, Star Dorminey, Shailesh Joshi, Yang Chen, Mark        [37] Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao,
+     Russinovich, and Thomas Moscibroda. Protean: VM Allocation Service             Chuang Gan, and Song Han. QServe: W4A8KV4 Quantization and
+     at Scale. In Proceedings of the 14th USENIX Symposium on Operating             System Co-design for Efficient LLM Serving, 2024.
+     Systems Design and Implementation (OSDI), 2020.                           [38] Ioannis Manousakis, Íñigo Goiri, Sriram Sankar, Thu D. Nguyen, and
+[22] Chang-Hong Hsu, Qingyuan Deng, Jason Mars, and Lingjia Tang.                   Ricardo Bianchini. CoolProvision: underprovisioning datacenter cool-
+     SmoothOperator: Reducing Power Fragmentation and Improving                     ing. In Proceedings of the 6th ACM Symposium on Cloud Computing
+     Power Utilization in Large-Scale Datacenters. In Proceedings of the            (SoCC), 2015.
+     23rd International Conference on Architectural Support for Programming    [39] David Meisner, Brian T Gold, and Thomas F Wenisch. Powernap:
+     Languages and Operating Systems (ASPLOS), 2018.                                eliminating server idle power. ACM SIGARCH Computer Architecture
+[23] Urs Hölzle. Our commitment to climate-conscious data center                    News, 37(1):205–216, 2009.
+     cooling. https://blog.google/outreach-initiatives/sustainability/our-     [40] Meta. 2024 Sustainability Report. https://sustainability.atmeta.com/
+     commitment-to-climate-conscious-data-center-cooling/, 2022.                    2024-sustainability-report/, 2024.
+[24] Majid Jalili, Ioannis Manousakis, Íñigo Goiri, Pulkit A. Misra, Ashish    [41] Meta. Llama3-70B. https://huggingface.co/meta-llama/Meta-Llama-
+     Raniwala, Husam Alissa, Bharath Ramakrishnan, Phillip Tuma, Chris-             3-70B-Instruct, 2024.
+     tian Belady, Marcus Fontoura, and Ricardo Bianchini. Cost-Efficient       [42] Xupeng Miao, Chunan Shi, Jiangfei Duan, Xiaoli Xi, Dahua Lin, Bin
+     Overclocking in Immersion-Cooled Datacenters. In Proceedings of the            Cui, and Zhihao Jia. SpotServe: Serving Generative Large Language
+     48th Annual International Symposium on Computer Architecture (ISCA),           Models on Preemptible Instances. In Proceedings of the International
+     2021.                                                                          Conference on Architectural Support for Programming Languages and
+[25] Weixiang Jiang, Ziyang Jia, Sirui Feng, Fangming Liu, and Hai Jin.             Operating Systems (ASPLOS), 2024.
+     Fine-grained warm water cooling for improving datacenter economy.         [43] Dongmoon Min, Ilkwon Byun, Gyu-hyeon Lee, and Jangwoo
+     In Proceedings of the 46th International Symposium on Computer Archi-          Kim. CoolDC: A Cost-Effective Immersion-Cooled Datacenter with
+     tecture (ISCA), 2019.                                                          Workload-Aware Temperature Scaling. ACM Transactions on Architec-
+[26] Andreas Kosmas Kakolyris, Dimosthenis Masouros, Sotirios Xydis,                ture and Code Optimization (TACO), 2024.
+     and Dimitrios Soudris. SLO-aware GPU DVFS for energy-efficient            [44] NVIDIA.          Cooling and Airflow Optimization.               https:
+     LLM inference serving. IEEE Computer Architecture Letters, 2024.               //docs.nvidia.com/dgx-superpod/design-guides/dgx-superpod-
+[27] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin                    data-center-design-h100/latest/cooling.html, 2024.
+     Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.        [45] NVIDIA. DGX H100: AI for Enterprise. https://www.nvidia.com/en-
+     Efficient Memory Management for Large Language Model Serving                   us/data-center/dgx-h100/, 2024.
+     with PagedAttention. In Proceedings of the Symposium on Operating         [46] NVIDIA.        Introduction to the NVIDIA DGX A100 System.
+     Systems Principles (SOSP), 2023.                                               https://docs.nvidia.com/dgx/dgxa100-user-guide/introduction-
+[28] Marina Lammertyn. 60+ ChatGPT Statistics And Facts You Need to                 to-dgxa100.html, 2024.
+     Know in 2024. https://blog.invgate.com/chatgpt-statistics, 2024.          [47] NVIDIA. TensorRT-LLM’s Documentation. https://nvidia.github.io/
+[29] Youngmoon Lee, Kang G. Shin, and Hoon Sung Chwa. Thermal-Aware                 TensorRT-LLM/, 2024.
+     Scheduling for Integrated CPUs–GPU Platforms. ACM Transactions            [48] Pratyush Patel, Esha Choukse, Chaojie Zhang, Íñigo Goiri, Brijesh
+     on Embedded Computing Systems (TECS), 2019.                                    Warrier, Nithish Mahalingam, and Ricardo Bianchini. Characterizing
+[30] Baolin Li, Yankai Jiang, Vijay Gadepally, and Devesh Tiwari. LLM               Power Management Opportunities for LLMs in the Cloud. In Proceed-
+     Inference Serving: Survey of Recent Advances and Opportunities.                ings of the 29th ACM International Conference on Architectural Support
+     arXiv preprint arXiv:2407.12391, 2024.                                         for Programming Languages and Operating Systems (ASPLOS), 2024.
+[31] Pengfei Li, Jianyi Yang, Adam Wierman, and Shaolei Ren. Towards           [49] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo
+     environmentally equitable AI via geographical load balancing. In               Goiri, Saeed Maleki, and Ricardo Bianchini. Splitwise: Efficient gen-
+     Proceedings of the 15th ACM International Conference on Future and             erative LLM inference using phase splitting. In Proceedings of the
+     Sustainable Energy Systems, pages 291–307, 2024.                               51st Annual International Symposium on Computer Architecture (ISCA),
+[32] Shaohong Li, Xi Wang, Xiao Zhang, Vasileios Kontorinis, Sreekumar              2024.
+     Kodakara, David Lo, and Parthasarathy Ranganathan. Thunderbolt:           [50] Qiangyu Pei, Shutong Chen, Qixia Zhang, Xinhui Zhu, Fangming
+     Throughput-Optimized, Quality-of-Service-Aware Power Capping at                Liu, Ziyang Jia, Yishuo Wang, and Yongjie Yuan. CoolEdge: hotspot-
+     Scale. In Proceedings of the 14th USENIX Symposium on Operating                relievable warm water cooling for energy-efficient edge datacenters. In
+     Systems Design and Implementation (OSDI), 2020.                                Proceedings of the 27th ACM International Conference on Architectural
+                                                                                    Support for Programming Languages and Operating Systems (ASPLOS),
+TAPAS: Thermal- and Power-Aware Scheduling for LLM Inference in Cloud Platforms               ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands
+
+
+     2022.                                                                       [68] Jovan Stojkovic, Pulkit Misra, Íñigo Goiri, Sam Whitlock, Esha
+[51] Steven Pelley, David Meisner, Pooya Zandevakili, Thomas F. Wenisch,              Choukse, Mayukh Das, Chetan Bansal, Jason Lee, Zoey Sun, Haoran
+     and Jack Underwood. Power routing: dynamic power provisioning in                 Qiu, Reed Zimmermann, Savyasachi Samal, Brijesh Warrier, Ashish
+     the data center. In Proceedings of the Fifteenth International Conference        Raniwala, and Ricardo Bianchini. SmartOClock: Workload- and Risk-
+     on Architectural Support for Programming Languages and Operating                 Aware Overclocking in the Cloud. In Proceedings of the International
+     Systems (ASPLOS), 2010.                                                          Symposium on Computer Architecture (ISCA), 2024.
+[52] Cheng Peng, Xi Yang, Aokun Chen, Kaleb Smith, Nima PourNeja-                [69] Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Josep Torrellas, and Esha
+     tian, Anthony Costa, Cheryl Martin, Mona Flores, Ying Zhang, Tanja               Choukse. DynamoLLM: Designing LLM Inference Clusters for Perfor-
+     Magoc, Gloria Lipori, Mitchell Duane, Naykky Ospina, Mustafa Ahmed,              mance and Energy Efficiency. In Proceedings of the IEEE International
+     William Hogan, Elizabeth Shenkman, Yi Guo, Jiang Bian, and Yonghui               Symposium on High Performance Computer Architecture (HPCA), 2025.
+     Wu. A study of generative large language model for medical research         [70] Christopher Tearpak. LLM RAG: Deploy LLM Inference Endpoints &
+     and healthcare. npj Digital Medicine, 2023.                                      Optimize Output with RAG. https://techcommunity.microsoft.com/
+[53] Haoran Qiu, Weichao Mao, Archit Patke, Shengkun Cui, Saurabh Jha,                t5/startups-at-microsoft/llm-rag-deploy-llm-inference-endpoints-
+     Chen Wang, Hubertus Franke, Zbigniew Kalbarczyk, Tamer Başar, and                amp-optimize-output-with/ba-p/4222636, 2024.
+     Ravishankar K. Iyer. Power-aware Deep Learning Model Serving with           [71] Technology Innovation Institute (TII).         Falcon-180B.       https://
+     𝜇-Serve. In USENIX Annual Technical Conference (USENIX ATC), 2024.               huggingface.co/tiiuae/falcon-180B, 2024.
+[54] Haoran Qiu, Weichao Mao, Archit Patke, Shengkun Cui, Saurabh Jha,           [72] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Alma-
+     Chen Wang, Hubertus Franke, Zbigniew T. Kalbarczyk, Tamer Başar,                 hairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal
+     and Ravishankar K. Iyer. Efficient Interactive LLM Serving with Proxy            Bhargava, Shruti Bhosale, et al. Llama 2: Open foundation and fine-
+     Model-based Sequence Length Prediction. In The 5th International                 tuned chat models. arXiv preprint arXiv:2307.09288, 2023.
+     Workshop on Cloud Intelligence / AIOps at ASPLOS 2024, 2024.                [73] Nedeljko Vasic, Thomas Scherer, and Wolfgang Schott. Thermal-aware
+[55] Varun Sakalkar, Vasileios Kontorinis, David Landhuis, Shaohong Li,               workload scheduling for energy efficient data centers. In Proceedings of
+     Darren De Ronde, Thomas Blooming, Anand Ramesh, James Kennedy,                   the 7th International Conference on Autonomic Computing (ICAC 2010),
+     Christopher Malone, Jimmy Clidaras, et al. Data Center Power Over-               page 169–174, New York, NY, USA, 2010. Association for Computing
+     subscription with a Medium Voltage Power Plane and Priority-Aware                Machinery.
+     Capping. In Proceedings of the 25th International Conference on Archi-      [74] Xiaorui Wang, Ming Chen, Charles Lefurgy, and Tom W Keller. SHIP:
+     tectural Support for Programming Languages and Operating Systems                 Scalable Hierarchical Power Control for Large-Scale Data Centers. In
+     (ASPLOS), 2020.                                                                  Proceedings of the 18th International Conference on Parallel Architectures
+[56] Siddharth Samsi, Dan Zhao, Joseph McDonald, Baolin Li, Adam                      and Compilation Techniques (PACT), 2009.
+     Michaleas, Michael Jones, William Bergeron, Jeremy Kepner, Devesh           [75] Qizhen Weng, Wencong Xiao, Yinghao Yu, Wei Wang, Cheng Wang,
+     Tiwari, and Vijay Gadepally. From Words to Watts: Benchmarking the               Jian He, Yong Li, Liping Zhang, Wei Lin, and Yu Ding. MLaaS in the
+     Energy Costs of Large Language Model Inference. In Proceedings of                wild: Workload analysis and scheduling in large-scale heterogeneous
+     the High Performance Extreme Computing Conference (HPEC), 2023.                  GPU clusters. In Proceedings of the 19th USENIX Symposium on Net-
+[57] Philipp Schmid. Deploy LLMs with Hugging Face Inference Endpoints.               worked Systems Design and Implementation (NSDI 2022), pages 945–960,
+     https://huggingface.co/blog/inference-endpoints-llm, 2024.                       2022.
+[58] Amazon Web Services. Amazon EC2 P4 Instances. https://aws.amazon.           [76] Grant Wilkins, Srinivasan Keshav, and Richard Mortier. Hybrid hetero-
+     com/ec2/instance-types/p4/, 2020.                                                geneous clusters can lower the energy consumption of LLM inference
+[59] Amazon Web Services. Amazon EC2 P5 Instances. https://aws.amazon.                workloads. In Proceedings of the 15th ACM International Conference on
+     com/ec2/instance-types/p5/, 2024.                                                Future and Sustainable Energy Systems, pages 506–513, 2024.
+[60] Amazon Web Services. Amazon SageMaker - Machine Learning Ser-               [77] Bingyang Wu, Shengyu Liu, Yinmin Zhong, Peng Sun, Xuanzhe Liu,
+     vices. https://aws.amazon.com/sagemaker/, 2024.                                  and Xin Jin. LoongServe: Efficiently Serving Long-context Large
+[61] Amazon Web Services. Meta Llama 3 models are now available in Ama-               Language Models with Elastic Sequence Parallelism. arXiv preprint
+     zon SageMaker JumpStart. https://aws.amazon.com/blogs/machine-                   arXiv:2404.09526, 2024.
+     learning/meta-llama-3-models-are-now-available-in-amazon-                   [78] Bingyang Wu, Yinmin Zhong, Zili Zhang, Gang Huang, Xuanzhe Liu,
+     sagemaker-jumpstart/, 2024.                                                      and Xin Jin. Fast distributed inference serving for large language
+[62] Bing Shi and Ankur Srivastava. Thermal and power-aware task sched-               models. arXiv preprint arXiv:2305.05920, 2023.
+     uling for Hadoop based storage centric datacenters. In International        [79] Qiang Wu, Qingyuan Deng, Lakshmi Ganesh, Chang-Hong Hsu, Yun
+     Conference on Green Computing (ICGC), 2010.                                      Jin, Sanjeev Kumar, Bin Li, Justin Meza, and Yee Jiun Song. Dynamo:
+[63] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley,                 Facebook’s Data Center-Wide Power Management System. In Proceed-
+     Jared Casper, and Bryan Catanzaro. Megatron-LM: Training Multi-                  ings of the International Symposium on Computer Architecture (ISCA),
+     Billion Parameter Language Models Using Model Parallelism. arXiv                 2016.
+     preprint arXiv:1909.08053, 2019.                                            [80] Zhisheng Ye, Wei Gao, Qinghao Hu, Peng Sun, Xiaolin Wang, Yingwei
+[64] Matt Skach, Manish Arora, Dean Tullsen, Lingjia Tang, and Jason Mars.            Luo, Tianwei Zhang, and Yonggang Wen. Deep learning workload
+     Virtual Melting Temperature: Managing Server Load to Minimize                    scheduling in GPU datacenters: A survey. ACM Computing Surveys,
+     Cooling Overhead with Phase Change Materials. In ACM/IEEE 45th                   56(6):1–38, 2024.
+     Annual International Symposium on Computer Architecture (ISCA), 2018.       [81] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim,
+[65] Matej Spetko, Ondrej Vysocky, Branislav Jansik, and Lubomir Riha.                and Byung-Gon Chun. Orca: A Distributed Serving System for
+     DGX-A100 Face to Face DGX-2—Performance, Power and Thermal                       Transformer-Based Generative Models. In Proceedings of the 16th
+     Behavior Evaluation. Energies, 14(2):376, 2021.                                  USENIX Symposium on Operating Systems Design and Implementation
+[66] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, and                  (OSDI), 2022.
+     Yiying Zhang. Preble: Efficient Distributed Prompt Scheduling for           [82] Lingfan Yu and Jinyang Li. Stateful Large Language Model Serving
+     LLM Serving. arXiv preprint arXiv:2407.00023, 2024.                              with Pensieve. arXiv preprint arXiv:2312.05516, 2023.
+[67] Jovan Stojkovic, Esha Choukse, Chaojie Zhang, Íñigo Goiri, and Josep        [83] Chaojie Zhang, Alok Gautam Kumbhare, Ioannis Manousakis, Deli
+     Torrellas. Towards Greener LLMs: Bringing Energy-Efficiency to the               Zhang, Pulkit A. Misra, Rod Assis, Kyle Woolcock, Nithish Mahalingam,
+     Forefront of LLM Inference. arXiv preprint arXiv:2403.20306, 2024.
+ASPLOS ’25, March 30-April 3, 2025, Rotterdam, Netherlands                                                                    Jovan Stojkovic et al.
+
+
+     Brijesh Warrier, David Gauthier, Lalu Kunnath, Steve Solomon, Os-     [85] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-
+     valdo Morales, Marcus Fontoura, and Ricardo Bianchini. Flex: High-         anzhe Liu, Xin Jin, and Hao Zhang. DistServe: Disaggregating Prefill
+     Availability Datacenters with Zero Reserved Power. In Proceedings          and Decoding for Goodput-optimized Large Language Model Serv-
+     of the 48th Annual International Symposium on Computer Architecture        ing. In 18th USENIX Symposium on Operating Systems Design and
+     (ISCA), 2021.                                                              Implementation (OSDI), 2024.
+[84] Youpeng Zhao Zhao, Di Wu Wu, and Jun Wang. ALISA: Accelerating        [86] Zhe Zhou, Xuechao Wei, Jiejing Zhang, and Guangyu Sun. PetS: A
+     Large Language Model Inference via Sparsity-Aware KV Caching. In           Unified Framework for Parameter-Efficient Transformers Serving. In
+     Proceedings of the 51st Annual International Symposium on Computer         Proceedings of the USENIX Annual Technical Conference (USENIX ATC),
+     Architecture (ISCA), 2024.                                                 2022.
+

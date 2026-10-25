@@ -1,0 +1,1182 @@
+Characterizing Power Management Opportunities for
+                 LLMs in the Cloud
+                Pratyush Patel∗                                        Esha Choukse                              Chaojie Zhang
+
+                    Íñigo Goiri                                       Brijesh Warrier                        Nithish Mahalingam
+                                                                    Ricardo Bianchini
+                                                                       Microsoft Azure
+
+Abstract                                                                          CCS Concepts: • Computer systems organization →
+Recent innovation in large language models (LLMs), and                            Cloud computing; • Hardware → Enterprise level and
+their myriad use cases have rapidly driven up the compute                         data centers power issues; • Applied computing → Data
+demand for datacenter GPUs. Several cloud providers and                           centers; • Information systems → Language models.
+other enterprises plan to substantially grow their datacenter                     Keywords: Large language models, power usage, cloud, dat-
+capacity to support these new workloads. A key bottleneck                         acenters, GPUs, power oversubscription, profiling
+resource in datacenters is power, which LLMs are quickly
+saturating due to their rapidly increasing model sizes.                           ACM Reference Format:
+                                                                                  Pratyush Patel, Esha Choukse, Chaojie Zhang, Íñigo Goiri, Brijesh
+   We extensively characterize the power consumption pat-
+                                                                                  Warrier, Nithish Mahalingam, and Ricardo Bianchini. 2024. Charac-
+terns of a variety of LLMs and their configurations. We iden-
+                                                                                  terizing Power Management Opportunities for LLMs in the Cloud.
+tify the differences between the training and inference power                     In 29th ACM International Conference on Architectural Support for
+consumption patterns. Based on our analysis, we claim that                        Programming Languages and Operating Systems, Volume 3 (ASPLOS
+the average and peak power utilization in LLM inference clus-                     ’24), April 27-May 1, 2024, La Jolla, CA, USA. ACM, New York, NY,
+ters should not be very high. Our deductions align with data                      USA, 16 pages. https://doi.org/10.1145/3620666.3651329
+from production LLM clusters, revealing that inference work-
+loads offer substantial headroom for power oversubscription.                      1    Introduction
+However, the stringent set of telemetry and controls that
+GPUs offer in a virtualized environment make it challenging                       Motivation. Cloud providers and datacenter operators today
+to build a reliable and robust power management framework.                        face a massive GPU capacity crunch due to the explosion in
+   We leverage the insights from our characterization to iden-                    demand for large language models (LLMs) [8]. For example,
+tify opportunities for better power management. As a de-                          OpenAI scaled up their clusters to 7,500 GPU servers to
+tailed use case, we propose a new framework called POLCA,                         train LLMs like GPT-3 [48]; Meta deployed an AI training
+which enables power oversubscription in LLM inference                             supercluster with over 6,000 A100 GPUs [38]. This demand is
+clouds. POLCA is robust, reliable, and readily deployable.                        growing for training newer and larger models like Bard and
+Using open-source models to replicate the power patterns ob-                      GPT-4 [16]. The demand for inference is even larger and may
+served in production, we simulate POLCA and demonstrate                           constitute over 90% of the overall LLM compute cycles [53,
+that we can deploy 30% more servers in existing clusters                          59, 61]. To keep up, several enterprises are investing heavily
+with minimal performance loss.                                                    into building new GPU clusters to run LLM workloads [38,
+                                                                                  48]. However, building new datacenters is expensive; and
+                                                                                  crucially, it takes a long time which does not address the
+∗ Pratyush Patel is affiliated with the University of Washington, but was a       immediate demand [7]. Adding more servers to existing and
+Microsoft intern during this work.                                                upcoming datacenters could help alleviate this demand.
+                                                                                     Power, space, and cooling are the major bottlenecks in dat-
+                                                                                  acenter provisioning. However, for GPU-heavy workloads
+Permission to make digital or hard copies of part or all of this work for
+personal or classroom use is granted without fee provided that copies are
+                                                                                  like LLMs, power is the main bottleneck. Datacenters are
+not made or distributed for profit or commercial advantage and that copies        typically built with a fixed power budget, based on contracts
+bear this notice and the full citation on the first page. Copyrights for third-   with utility companies [15, 17, 23, 73]. Therefore, without
+party components of this work must be honored. For all other uses, contact        proper power usage analysis and management, adding more
+the owner/author(s).                                                              GPU servers to an existing datacenter could push them be-
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+                                                                                  yond the available power budget.
+© 2024 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-0386-7/24/04                                                  Our work. We extensively analyze the power usage of LLM
+https://doi.org/10.1145/3620666.3651329                                           training and inference serving at the server level and cluster
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                        Patel et al.
+
+                                                                           Utility
+                                                                                               ATS           Generator
+                                                                         power grid
+   GPT forward        GPT forward    GPT forward    GPT forward
+     pass 1             pass 2         pass 3         pass 4               UPS          UPS            UPS         UPS
+
+                      KV              KV             KV
+  Is pizza better,   cache   Pizza   cache
+                                               is           better EOS       PDU               PDU               PDU
+                                                    cache
+    or a burger?
+    Prompt                                 Token                           Rack 1             Rack 1            Rack 1
+   processing                                                                 ...               ...               ...
+                                         sampling
+                                                                           Rack n             Rack n            Rack n
+
+Figure 1. An example of the prompt and token phases                      Figure 2. Hierarchy of the power                Figure 3. Provisioned power
+in a GPT (decoder) model.                                                distribution in a datacenter.                   (8×A100-80GB server).
+
+level. Specifically, we characterize the power usage patterns                       • A case study on developing a practical power oversubscrip-
+for several popular, open-source LLMs across various con-                             tion framework for cloud-based LLM inference clusters,
+figurations representative of common use cases. We also                               supplemented with its evaluation on production traces.
+gauge how amenable both workloads are to power manage-
+ment knobs such as frequency locking and power capping.
+                                                                                    2   LLMs in the Cloud
+Subsequently, we validate whether our server-level char-
+acterization insights hold at scale by profiling production                         We provide background on LLMs and describe their deploy-
+LLM clusters. Our characterization reveals that LLM training                        ments at scale in cloud datacenters.
+clusters incur massive and coordinated power peaks due to
+                                                                                    Transformer models. Our work focuses on transformer-
+large-scale synchronous training jobs. Hence, they signifi-
+                                                                                    based generative LLMs. Beyond the tokenizer and embedding
+cantly strain the datacenter power delivery infrastructure
+                                                                                    layers common in language models, transformers generally
+and offer a very small headroom (about 3%) to oversubscribe
+                                                                                    consist of attention and multi-layer-perceptron layers to
+power. In contrast, despite high peak power utilization at the
+                                                                                    contextualize inputs and generate outputs [67]. Encoder-only
+server level, LLM inference clusters offer substantial power
+                                                                                    models like BERT [14] and RoBERTa [37] use bi-directional
+headroom (about 21%) at the cluster level, which makes them
+                                                                                    self-attention, allowing them to contextualize the input to-
+excellent candidates for power oversubscription.
+                                                                                    kens all together for language understanding tasks like senti-
+   Based on our characterization, we identify opportunities
+                                                                                    ment analysis. Decoder-only transformer models like GPT [57]
+to improve the power management for LLMs in the cloud.
+                                                                                    and BLOOM [70] consist of masked or uni-directional self-
+As a concrete example, we present POLCA, a robust power
+                                                                                    attention for generating language sequences. Encoder-decoder
+oversubscription framework for LLM inference clusters. Us-
+                                                                                    models like FLAN-T5 [12] use an encoder for understanding
+ing open-source models, we replicate power patterns from
+                                                                                    the input and the decoder for generating text.
+production LLM inference clusters for its evaluation. POLCA
+integrates with the existing cluster-level power manager                            Training vs. inference. Training and inference workloads
+in datacenters and boosts the provisioned server capacity                           have different compute, network, and power requirements.
+by 30% while incurring minimal power throttling events. It                          LLM training is much more resource intensive since the
+improves power efficiency, reduces costs through fewer data-                        model is fed a lot of data in parallel for many iterations. Each
+centers, and helps to promptly meet the demand for running                          training iteration involves a forward and a backward pass
+additional LLM workloads.                                                           through the model with computation- and communication-
+                                                                                    heavy phases [25]. LLM training is thus run on large physical
+Summary. We make the following contributions:                                       clusters with high-bandwidth Infiniband or optical networks
+• A practical methodology to monitor, control, and analyze                          for fast communication. For example, OpenAI scaled up clus-
+  the power usage of cloud LLM workloads.                                           ters to 7500 GPU servers to train LLMs like GPT-3 [48]. In
+• A characterization of the power usage patterns of LLM                             contrast, inference only performs forward passes through
+  training and inference, with a deep dive into the power                           the model, operates on one or a few data samples per re-
+  consumption phases in inference.                                                  quest, and consequently requires fewer compute resources
+• A characterization of the efficacy of existing GPU power                          and interconnects. For instance, a BLOOM-176B [70] infer-
+  management knobs, namely frequency locking and power                              ence (similar model size to GPT-3 [10]) can be served using
+  capping, at reclaiming power for LLM workloads.                                   eight GPUs on a single server.
+• An overview of the available power headroom and power                                Due to their differing requirements, several existing de-
+  usage patterns in production LLM clusters today.                                  ployments separate training and inference clusters. For ex-
+• A discussion on the design implications of our characteri-                        ample, OpenAI and Meta recently announced their training-
+  zation for LLM clusters and frameworks.                                           only clusters [38, 48], Microsoft Philly was a training-only
+Characterizing Power Management Opportunities for LLMs in the Cloud                     ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+cluster [29], Meta uses separate infrastructure for ML train-         3.1   Power Monitoring
+ing and inference [21], and Amazon deploys separate train-            The power usage of a GPU cluster running LLMs can be
+ing and inference chips (Trainium [62] and Inferentia [61]).          monitored at various levels, which present different trade-
+In this work, we mainly focus on inference since it accounts          offs as shown in Table 1. The coarsest option is to monitor
+for a majority of the compute demand for LLMs [53, 59, 61].           power out of band at the row level, wherein the row man-
+Configuration knobs.                                                  ager aggregates the power draw across all servers in the
+• Batch size defines the number of requests processed to-             row. Server power can be monitored via IPMI [26], which
+  gether. A larger batch size can yield higher throughput.            queries the server baseboard management controller (BMC)
+• Input size defines the length of the prompt sequence.               to obtain power readings. GPU power can be monitored
+• Output size defines the maximum number of tokens gen-               out of band (OOB) via utility interfaces [42], or in band (IB)
+  erated per request.                                                 via vendor-provided software tools [3, 43, 47]. For example,
+                                                                      NVIDIA provides SMBPBI for OOB power monitoring per
+Prompt processing vs. token sampling. Figure 1 shows
+                                                                      GPU [42]; unfortunately, it is quite slow in practice. NVIDIA
+the two main phases in an LLM inference: prompt processing
+                                                                      also provides two IB tools: nvidia-smi [47] and DCGM [43].
+and token sampling. Prompt processing is done in parallel
+                                                                      nvidia-smi can monitor basic GPU runtime statistics, such as
+on the entire input, making it compute intensive. The as-
+                                                                      instantaneous/average power draw, utilization, and memory
+sociated state is saved in the KV-cache for token sampling
+                                                                      usage. DCGM provides additional support to monitor GPU
+iterations [57]. In contrast, token sampling is sequential and
+                                                                      performance counters like Streaming Multiprocessor (SM)
+uses cached data from previously processed tokens, making
+                                                                      activity, memory activity, and PCIe TX/RX usage. Other GPU
+it computationally light but memory bandwidth intensive.
+                                                                      vendors also provide similar tools for GPU monitoring [3].
+Cloud offerings. Cloud providers can host LLMs in different
+ways in their datacenters. The first approach lets customers          3.2   Power Controls
+bring their own models which they host using cloud virtual
+machine offerings. Doing so makes the model opaque to the             CPU knobs. CPUs provide interfaces like IPMI [26] (OOB)
+cloud provider and offers limited power management capabil-           and RAPL [55] (IB), which serve as a fast and reliable mecha-
+ities. Alternatively, cloud providers could use platforms like        nisms to control server power [31]. These mechanisms throt-
+Singularity [64], Azure OpenAI [6], Google Vertex AI [56],            tle CPU (and optionally DRAM) power when it exceeds a
+Amazon SageMaker [1], or Azure ML [2] to offer LLMs as                preset threshold. Alternatively, CPUs can also throttle mem-
+a service. Although such platforms are also virtualized, this         ory bandwidth to implement QoS-aware power capping [34].
+method gives the cloud provider visibility into the models.
+Power provisioning. A datacenter floor plan is generally              GPU knobs. GPUs provide IB and OOB interfaces for power
+built around the power distribution hierarchy. Figure 2 shows         control; however, these are independent of the CPU.
+an example power distribution hierarchy in an LLM clus-
+ter, where power distribution units (PDUs) power rows of              In-band knobs. GPU power can be controlled in-band via
+racks [73]. GPU servers are deployed within each rack, and            vendor-provided tools to implement frequency locking and
+several racks make a row. By rule of thumb, GPU servers are           power capping [3, 47]. GPUs expose two clock domains (i.e.,
+provisioned for peak power draw because: (1) GPUs are de-             SM and memory), which impact power draw. Clock frequen-
+signed to maximize FLOPS, so hitting peak power draw is a             cies can be manually configured to a desired value via fre-
+likely scenario, and (2) cloud servers may run any workload,          quency locking. Power capping limits GPU power consump-
+so provisioning for the worst case ensures safety. Conse-             tion to a software-specified value by reactively throttling fre-
+quently, provisioning power for GPU servers is expensive.             quencies. This mechanism is similar to RAPL for CPUs [31],
+   Most large-scale CPU clusters today use some form of               but offers less precise control and flexibility [51]. By default,
+power management and power oversubscription to reduce                 GPU power caps are set to the device TDP but they can be
+cost [17, 31]. For example, they might derate servers, use            configured to a lower range. IB configuration changes can
+workload-aware power capping [31], or implement throttle-             typically be done within a few milliseconds.
+aware power management [34]. In contrast, effective power             Out-of-band knobs. NVIDIA GPUs support OOB frequency
+management is challenging in LLM clusters due to slow and             capping, power capping, and power breaks via SMBPBI [42].
+unreliable GPU power management interfaces [51].                      Unlike IB management, OOB frequency caps can configure
+                                                                      the frequency only for SMs. In addition, as shown in Table 2,
+3    Characterization Methodology                                     OOB control is much slower and may take up to 40 seconds
+We describe the existing landscape for power monitoring               to execute in today’s clusters. Power brake is a faster OOB
+and control in LLM clusters, cloud-specific challenges, and           lever that brings all GPUs down to almost a halt within 5
+our methodology to address them.                                      seconds, while reclaiming substantial power.
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                       Patel et al.
+
+
+                                                                                          Category          Model         #Params    #Inference GPUs
+      Mechanism     Granularity    Path   Interval         Parameter           Value
+                                                                                          Encoder           RoBERTa       355M       1
+       RAPL [30]    CPU & DRAM      IB    1–10ms        Number of servers        40       Decoder           Llama2*       13B, 70B   1, 2, 4
+       DCGM [43]        GPU         IB    100ms+          Server type         DGX-A100                      GPT-NeoX      20B        2
+      SMBPBI [42]       GPU        OOB      5s+       Power telemetry delay      2s                         OPT*          30B        4
+        IPMI [26]      Server      OOB     1–5s        Power brake latency       5s                         BLOOM*        176B       8
+      Row manager   Row of racks   OOB       2s        OOB control latency      40s       Encoder-Decoder   Flan-T5 XXL   11B        1
+
+  Table 1. Power monitoring interfaces Table 2. Row-level parameters Table 3. LLM workloads that we characterize
+  in an LLM cluster.                   in our study.                 (*inference only).
+
+
+
+3.3     Challenges in Cloud LLM Deployments                                      Our approach addresses the aforementioned challenges
+                                                                              as follows. First, rather than relying on server-level knobs,
+Lack of server-level control knobs. On CPU servers, fea-                      we only characterize GPU power since they account for a
+tures like IPMI [26] and RAPL [55] provide a fast and reliable                majority of the server power usage as shown in Section 4.3.
+way to control full server power by setting a single cap on                   Second, we side step the workload visibility issue by selecting
+the CPU. However, there are no unified power controls avail-                  a representative set of training and inference benchmarks.
+able for GPU servers. Cloud operators must separately tweak                   Third, by profiling VMs as a cloud user, we retain access to
+CPU and GPU knobs to implement power management.                              IB interfaces for GPU characterization.
+Limited workload visibility. LLMs deployed in customer-                       Hardware. We run workloads on two NVIDIA DGX A100
+operated virtual machines prevent provider visibility into                    virtual machines with 8×A100-40GB and 8×A100-80GB GPUs
+workloads. Even when services are offered by the cloud                        respectively [44, 46]. Both machines have a dual-socket AMD
+provider, the teams responsible for infrastructure manage-                    Rome CPU. GPUs communicate with the host CPU using
+ment tend to view virtual machines as black boxes [31],                       PCIe 4.0 and they are interconnected via NVLink 3.0 for fast
+which limits power monitoring and control capabilities.                       inter-GPU communication. Figure 3 shows a breakdown of
+Lack of IB support under virtualization. GPUs virtual-                        the provisioned power per server component; around 50%
+ized by hypervisors typically use fixed passthrough, which re-                of the power is provisioned for GPUs. Due to GPU avail-
+linquishes GPU visibility and control to VMs [68]. Although                   ability crunch, we use the former machine to run training
+GPUs have faster IB support for monitoring and manage-                        workloads and the latter to run inference workloads.
+ment, it requires access to GPU drivers. Thus, any power                      Models. Table 3 shows the LLMs that we characterize. Our
+monitoring and control tools need to be accessible OOB to                     selection represents some of the latest and largest publicly
+be useful for cloud management or characterization. Note                      available LLMs. We consider all three kinds of transformer
+that VM customers can still make use of IB GPU interfaces.                    architectures [67]: Encoder (RoBERTa [37]), Decoder (GPT-
+Slow and unreliable GPU OOB interfaces. As Table 2                            NeoX [5], OPT [74], Llama2 [66], BLOOM [70]), and En-
+shows, today’s OOB GPU management interfaces extremely                        coder+Decoder (Flan-T5 [12]). We focus especially on de-
+slow and take up to 40s to implement on a single server.                      coder models (i.e., generative LLMs) due to their growing
+By contrast, the power capping deadline required by the                       popularity. Within these, we evaluate both older (e.g., GPT-
+UPS is within 10s [73]. Further, OOB management interfaces                    NeoX) and newer (e.g., BLOOM, Llama2) LLMs. Our model
+are unreliable and may sometimes fail without signaling                       sizes fully span the available GPU memory on our machine.
+completion or errors. These issues make them impractical to                   LLM frameworks. Since LLM frameworks are rapidly evolv-
+deploy in production without sufficient guardrails.                           ing and each supports different models and features, we use
+                                                                              a combination frameworks for this characterization. Specif-
+3.4     Profiling Approach                                                    ically, for LLM training we use Huggingface Transformers
+Given numerous challenges in profiling cloud workloads, we                    with Accelerate [20, 69], GPT-NeoX library [5], and Deep-
+adopt a different strategy. First, we select a diverse set of                 Speed [60] to cover different kinds of parallelisms. For LLM
+LLMs to benchmark on a representative cloud server. We                        inference, we use DeepSpeed Inference [4, 39] and vLLM [32],
+then monitor the GPU-level and server-level power usage                       which support our target models. Finally, to evaluate LLM in-
+of these workloads using DCGM and IPMI respectively. We                       ference with different datatypes, we use Huggingface Trans-
+also use nvidia-smi to configure GPU frequency locking and                    formers [69] with the bitsandbytes library [13].
+power capping. From our profiling results, we draw insights                   Monitoring and control configuration. We run DCGM
+about the power consumption patterns of different LLMs at                     at a 100ms interval to capture the power draw, utilization,
+the server level. Finally, we validate whether our findings                   compute / memory activity, and other performance counters
+hold at the cluster level by profiling aggregate power usage                  on each GPU [43]. IPMI is run infrequently and is used to val-
+trends of cloud-based LLM training and inference.                             idate DCGM power measurements. For GPU power control,
+Characterizing Power Management Opportunities for LLMs in the Cloud                                                           ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+we use nvidia-smi to configure frequency locking and power                                                                      No cap                 325W cap                                         1.1GHz
+capping within a subset of the support GPU SM frequencies                                                            RoBERTa                     GPT-NeoX                                                Flan-T5
+                                                                                                    1.00
+
+
+                                                                       Normalized Power
+(1.1–1.4GHz) and power caps (300–400W). Finally, for cluster
+profiling, we use the row manager to obtain aggregate row                                           0.75
+power draw every 2 seconds.                                                                         0.50
+                                                                                                    0.25
+Minimizing overheads. Since DCGM repeatedly queries
+GPU counters, it can introduce power and performance over-                                                   0           5           10      0        5                                    10      0         10         20
+                                                                                                                      Time (s)                     Time (s)                                               Time (s)
+heads. We find that that enabling DCGM consistently in-
+creases the IPMI server power usage by about 5–10W. Since             Figure 4. Power usage time-series for training workloads
+this is relatively tiny, we directly report DCGM power num-           under no cap, power cap, and frequency cap.
+bers in our results. For performance, DCGM may cause sig-
+nificant degradation and variability under certain configu-                                             RoBERTa           GPT-NeoX           Flan-T5                                  RoBERTa           GPT-NeoX            Flan-T5
+
+
+
+
+                                                                            Performance Reduction (%)                                                     Performance Reduction (%)
+rations. We mitigate this by getting accurate performance                                               0                                                                              0
+measurements in a separate run without DCGM profiling.                                                   5                                                                             5
+                                                                                                        10                                                                            10
+Training. Our LLM training setup uses a combination of dis-
+tributed data, tensor, and/or pipeline parallelism [25, 35, 63].                                        15                                                                            15
+                                                                                                             20        15     10      5      0                                              20        15     10      5       0
+Because we have limited GPU resources to train LLMs, we                                                           Peak Power Reduction (%)                                                       Peak Power Reduction (%)
+actually profile LLM fine-tuning at the server level instead of                                          (a) Frequency locking.                                                            (b) Power capping.
+full-scale LLM training. We train each model on a dedicated
+server for at least 5 minutes (100+ iterations) across all 8          Figure 5. Peak power vs. performance reduction for training.
+GPUs, and configure the training batch sizes to use at least
+85% of the GPU memory. To ensure that our takeaways from
+LLM fine-tuning are consistent with LLM training at scale,            4                                 LLM Power Characterization
+we validate our server-level profiling results with cluster-          Using our methodology, we extensively characterize LLM
+level production data in Section 4.3.                                 power usage patterns at the server and cluster levels, fo-
+                                                                      cusing on the intrinsic differences between training and
+Inference. We profile LLM inference using tensor paral-               inference workloads, between prompt and token phases, and
+lelism and emulate the worst-case scenario for power utiliza-         their behaviors under GPU power management techniques.
+tion by running a constant stream of inference requests.
+                                                                      4.1                                LLM Training Characterization
+Warm-up. LLM inference frameworks (e.g., FasterTransformer
+                                                                      Peak power. Figure 4 (blue) shows the GPU power usage
+and DeepSpeed-Inference) typically allocate workspace mem-
+                                                                      time series updated every 100ms for 5 iterations of training
+ory when serving the first inference request (after loading the
+                                                                      per model. The peak power during the training iterations
+model). This memory region is then reused for subsequent
+                                                                      goes up to the TDP of the GPUs, and beyond for GPT-NeoX
+requests. Thus, the first inference executes much slower than
+                                                                      and Flan-T5. On the other hand, RoBERTa, a smaller encoder-
+in the steady state, which also impacts power usage patterns.
+                                                                      only model does not reach the TDP. Note that different types
+To avoid this, we warm-up the LLM serving framework with
+                                                                      of data sharding, batching, and parallelism techniques could
+at least three requests before taking measurements.
+                                                                      slightly change this behavior.
+Identifying prompt and token phases. We modify LLM infer-             Insight 1: The peak power draw across GPUs in LLM train-
+ence frameworks to output performance information for                 ing iterations often reaches or exceeds their TDP. For cluster
+prompt and token phases by adding appropriate timestamps              power design, this means that LLM training clusters need to
+and GPU synchronization. In cases where synchronization               overprovision GPU power to ensure power safety.
+overhead is unacceptable, we profile prompt phases by gen-            Power swings. Figure 4 (blue) also shows that there are
+erating only a single output token, and token phases by               big swings in power draw across GPUs each iteration. For
+generating multiple output tokens with a medium-sized in-             example, in RoBERTa, an iteration lasts for ∼1 second. Each
+put prompt. When monitoring GPU performance counters                  iteration has a small dip in power around the 0.5 second
+for the prompt and token phases, we observe that certain              mark, and a big dip in power at the end. The smaller dip
+counters are instantaneous (e.g., power), whereas others are          is caused between the forward and backward phases, since
+updated on an interval basis (e.g., SM activity, tensor core          threads working on the same data synchronize and the GPU
+utilization, etc.). Hence, the timeseries data of these perfor-       utilization decreases. On the other hand, the larger dip is
+mance counters typically has a lag. We use counter value              caused at the end of the iteration when all the GPUs synchro-
+peaks to identify such lag and align them appropriately.              nize before the next iteration starts. Thus, the power swings
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                      Patel et al.
+
+
+are caused by the inherent workload behavior of switching          with three inferences of the same prompt. Across all infer-
+between computation- and communication-intensive phases.           ence models, during every iteration, the power usage pat-
+   The power consumption in the communication-intensive            terns exhibit two distinct phases: power spikes in the begin-
+phase is different across the three models. While RoBERTa is       ning, and a stable, lower power consumption later. Power
+still at 75% of the TDP at the iteration boundary, GPT-NeoX        spikes consistently occur at the start of every inference re-
+drops down to 50%, and Flan-T5 goes down all the way to            quest, often going beyond GPU TDP. These spikes corre-
+20%, which corresponds to the idle power of the GPUs.              spond to the compute-intensive prompt phases of LLMs,
+   In larger-scale training, such power swings are correlated      which processes all input tokens in parallel. Following the
+across thousands of GPUs running the training job, which           spike, the stable, lower power consumption phase corre-
+could cause challenges in the power delivery infrastructure.       sponds to the sequential, auto-regressive token sampling.
+                                                                   The token sampling phase sequentially generates new to-
+Insight 2: Large power swings are common in LLM training           kens by reusing activations stored in the KV-cache. It incurs
+due to alternating computation- and communication-intensive        lower computation, so the power draw during this phase is
+phases across many GPUs. Since current power delivery infras-      relatively stable and low. Prompt phases tend to be shorter,
+tructure cannot always safely support large-scale power swings,    since a large number of output tokens may be generated
+LLM training clusters need specialized power infrastructure        sequentially in each request.
+and management.                                                       To validate the above, we profile various GPU performance
+                                                                   counters during the prompt and token phases of BLOOM
+Impact of capping. Next, we investigate the impact of GPU          inference. Figure 7 shows the pairwise Pearson correlations
+frequency locking and power capping on training work-              between these counters. We observe that the prompt phase
+loads in Figure 4. We observe that the peak power is reduced       is highly correlated with the SM and tensor activity and
+by up to 20% under both frequency locking and power cap-           inversely correlated with memory activity on the GPU. In
+ping. However, power capping is more effective at alleviating      contrast, the token phase counters are generally uncorrelated
+power swings since it brings down the peak power while             with each other, and it has lower power draw.
+keeping the power troughs high. For example, GPT-NeoX
+and Flan-T5 substantially drop power usage at the iteration        Insight 4: LLM inference has distinct power consumption
+boundary, thereby not being impacted by power capping in           phases corresponding to prompt computation and token gener-
+those durations. On the other hand, since RoBERTa draws            ation: prompt phases are brief and typically reach or exceed
+considerable power at the iteration boundary, power capping        GPU TDP, whereas token phases are longer and draw less power.
+could also bring down the trough in the power consumption.         For cluster power design, this means that peak power in LLM
+   Figure 5 shows the impact of frequency locking and power        inference clusters must be provisioned for the prompt phases,
+capping on the throughput of the training. Frequency lock-         but doing so leads to underutilization during token phases; this
+ing is constantly active and thereby more effective in reduc-      mismatch must be addressed to improve power efficiency.
+ing peak power draw, whereas power capping introduces              Power patterns with different configurations. Figure 8
+more performance and power variability due to its reactive         shows the power consumption patterns and latency impli-
+implementation [9]. For Flan-T5 and GPT-NeoX, frequency            cations for a variety of LLM inference configurations. To
+capping reduces the peak server power by 22% while only im-        separately characterize the peak and mean power, we depict
+pacting the performance by 10%. Thus, for large cluster-level      GPU power normalized to TDP for each configuration in
+training jobs, both frequency locking and power capping can        stacked bars of two components: the lower (opaque bars,
+help reduce peak power and mitigate power swings, or, in           indicating mean power during iterations) and the higher
+case of multiple smaller concurrent jobs, they could be used       (regular bars, indicating peak power). We first observe that
+to enable power oversubscription.                                  under the same configuration, larger models (e.g., BLOOM-
+                                                                   176B) incur a much higher amount of computation during
+Insight 3: Power capping reduces peak power draw without           both prompt and token phases, and show significantly larger
+affecting troughs, making it effective at reducing the magnitude   peak and mean power consumption.
+of training power swings. Frequency locking lowers the overall
+                                                                   Input sizes. Figure 8a shows the mean and peak power to
+power consumption, making it effective at reclaiming power
+                                                                   TDP ratio varying input sizes from 256 to 8192 tokens. As
+on demand. Thus, both are useful in improving the power
+                                                                   input size increases, peak power drastically increases across
+management in LLM training clusters.
+                                                                   all models, reflecting the increase in prompt phase com-
+                                                                   putations. The mean power, dominated by token sampling
+4.2   LLM Inference Characterization                               computation, remains stable and low, further emphasizing
+                                                                   power usage differences between prompt and token phases.
+Phases in power consumption. Figure 6 shows the power              Figure 8b shows the corresponding latency results. As the
+consumption time series for various inference models, each         sequential token sampling phase contributes to most of the
+Characterizing Power Management Opportunities for LLMs in the Cloud                                                                                                                                                                                                                                                                                              ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+
+
+Normalized Power                                                                                                    Normalized Power                                                                                                                      Normalized Power                                                              Normalized Power                                                       Normalized Power
+                                                                                                  TDP                                                                                                                                    TDP                                                                                   TDP                                                                     TDP                                                                         TDP
+                        1.0                                                                                                            1.0                                                                                                                                   1.0                                                                           1.0                                                                    1.0
+                        0.8                                                                                                            0.8                                                                                                                                   0.8                                                                           0.8                                                                    0.8
+                        0.6                                                                                                            0.6                                                                                                                                   0.6                                                                           0.6                                                                    0.6
+                               0                        20                                   40                                                0                                        5           10                               15                                            0           10                             20                                 0          5             10          15                                   0                     10      20       30
+                                                       Time (s)                                                                                                                                Time (s)                                                                                      Time (s)                                                                               Time (s)                                                                       Time (s)
+
+                                   (a) Flan-T5.                                                                                         (b) GPT-NeoX-20B.                                                                                                                              (c) OPT-30B.                                                              (d) Llama2-70B.                                                    (e) BLOOM-176B.
+
+Figure 6. GPU power usage timeseries for multiple inference models. It shows distinct power usage patterns in prompt (spiky)
+vs. token phase (longer, more stable, and lower). The phases in each model take different amount of times.
+
+                                                                   Prompt phase                                                                                                                     Token phase
+                                                                                                                                                                                                                                                                                                                                                            TDP                                               TDP                                                                TDP
+
+
+                                                                                                                                                                                                                                                                                                 Normalized Power                                                     Normalized Power                                                  Normalized Power
+                          Power      1       -0.07 -0.89                  0.8       0.84 -0.97 -0.75 -0.59                                    1                     0.44 0.24 0.13 0.14 0.09 0.02 -0.01
+                                                                                                                                                                                                                                                                              1.00
+                                                                                                                                                                                                                                                                                                                    1.0                                                                  1.0                  Cap                                          1.0                   Cap
+                                                                                                                                                                                                                                                                              0.75
+                  GPU
+                                   -0.07         1         -0.19                                   0.3       -0.06 -0.22                     0.44                       1             0.13 -0.02 -0.02                         0.2        0.11 0.05
+           Utilization
+                                                                                                                                                                                                                                                                              0.50
+             Memory
+           Utilization
+                                   -0.89 -0.19                 1          0.5       0.55 0.95 0.66 0.59                                      0.24 0.13                                    1          -0.15 -0.17 0.09                     0.1         0                                                             0.5                                                                  0.5                                                               0.5
+                                                                                                                                                                                                                                                                              0.25
+                   SM
+                                   0.8                       0.5            1           1         -0.66 0.81 0.77                            0.13 -0.02 -0.15                                           1       0.99 0.08 0.02 0.01
+              Activity
+                                                                                                                                                                                                                                                                              0.00
+         Tensor Core
+                                   0.84                    0.55             1           1         -0.66 0.84 0.79                            0.14 -0.02 -0.17 0.99                                                  1         0.08 0.04 0.05                                                                        0.0                                                                  0.0                                                               0.0
+              Activity
+             Memory
+                                                                                                                                                                                                                                                                               0.25                                       0             20                       40                            0      20              40                                         0       20        40
+              Activity
+                                   -0.97       0.3         0.95 -0.66 -0.66                          1       0.87 0.83                       0.09                     0.2             0.09 0.08 0.08                             1        0.75 0.77
+                                                                                                                                                                                                                                                                               0.50
+                                                                                                                                                                                                                                                                                                                                     Time (s)                                                      Time (s)                                                           Time (s)
+                  PCIe
+                                   -0.75 -0.06 0.66 0.81 0.84 0.87                                              1          0.87              0.02 0.11                                  0.1          0.02 0.04 0.75                          1      0.78
+            Transmit
+                                                                                                                                                                                                                                                                               0.75
+                  PCIe
+             Receive
+                                   -0.59 -0.22 0.59 0.77 0.79 0.83 0.87                                                         1        -0.01 0.05                                       0          0.01 0.05 0.77 0.78                              1
+                                                                                                                                                                                                                                                                               1.00
+                                                                                                                                                                                                                                                                                                                          (a) No cap.                                 (b) 325W cap per GPU. (c) 1.1GHz SM clock.
+                                    Power                                                                                                    Power
+                                                GPU         Memory
+                                                                           SM                     Memory       PCIe                                                    GPU             Memory
+                                                                                                                                                                                                       SM                     Memory       PCIe
+                                                                                    Tensor Core
+                                                                                                                           PCIe
+                                                                                                                                                                                                                Tensor Core
+                                                                                                                                                                                                                                                     PCIe
+                                                                         Activity                 Activity   Transmit     Receive                                                                    Activity                 Activity   Transmit   Receive
+                                             Utilization   Utilization                                                                                              Utilization       Utilization
+                                                                                      Activity                                                                                                                    Activity                                                                      Figure 9. GPU power capping and frequency locking on
+                                                                                                                                                                                                                                                                                                BLOOM inference (input=8192, output=128, and batch=1).
+Figure 7. Pairwise correlations of GPU counters for prompt
+and token phases when running BLOOM inference.
+                                                                                                                                                                                                                                                                                               Batch sizes. Figure 8c shows the power impact of varying
+                                                                                                                                                                                                                                                                                               batch sizes from 1 to 16. Larger batch sizes effectively in-
+                                            256                             1024                               4096                                                                                         256                           1024                                 4096
+                                            512                             2048                               8192                                                                                         512                           2048                                 8192            crease the input sizes for prompt computation, resulting
+                                                                                                         TDP
+                                                                                                                                                                                                                                                                                               in similar increase in peak power draws. Mean power also
+
+Normalized Power                                                                                                                               Query Latency (s)
+                   1.00                                                                                                                                             10.0
+
+                   0.75                                                                                                                                                7.5                                                                                                                     exhibits a gradual increase, since the effective number of
+                   0.50                                                                                                                                                5.0                                                                                                                     tokens processed concurrently during the token phase is
+                   0.25                                                                                                                                                2.5
+                                                                                                                                                                                                                                                                                               higher. Figure 8d shows a slight latency increase because the
+                   0.00                                                                                                                                                0.0
+                               Flan-T5 GPT-NeoX                           OPT                Llama2 BLOOM                                                                               Flan-T5 GPT-NeoX OPT                                            Llama2 BLOOM
+                                                                         Model                                                                                                                          Model
+                                                                                                                                                                                                                                                                                               amount of computation increases in both the prompt and
+              (a) Power varying input sizes.                                                                                                         (b) Latency varying input sizes.                                                                                                          token phases with larger batch sizes.
+                          1                  2                            4                         8                            16                                               1                             2                        4                          8                   16     Output sizes. Figure 8e and Figure 8f show that increasing out-
+                                                                                                         TDP
+                                                                                                                                                                                                                                                                                               put size does not affect the peak and mean power drawn, but
+
+     Normalized Power                                                                                                                           Query Latency (s)
+                        1.00                                                                                                                                        10.0
+
+                                                                                                                                                                       7.5
+                        0.75                                                                                                                                                                                                                                                                   simply increases the duration of request execution linearly.
+                        0.50                                                                                                                                           5.0
+
+                                                                                                                                                                       2.5
+                                                                                                                                                                                                                                                                                               Because token sampling is sequential and auto-regressive,
+                        0.25
+
+                        0.00                                                                                                                                           0.0
+                                                                                                                                                                                                                                                                                               similar computation and power consumption patterns repeat
+                               Flan-T5 GPT-NeoX OPT                                         Llama2 BLOOM                                                                                Flan-T5 GPT-NeoX                                  OPT           Llama2 BLOOM
+                                               Model                                                                                                                                                                                     Model                                                 for each generated token.
+               (c) Power varying batch sizes.                                                                                                       (d) Latency varying batch sizes.                                                                                                           Insight 5: The peak and mean power draw for LLM inference
+                                            128                             512                               2048                                                                                          128                           512                                  2048
+                                            256                             1024                              4096                                                                                          256                           1024                                 4096
+                                                                                                                                                                                                                                                                                               depend primarily on the input prompt size and batch size, while
+                                                                                                         TDP                                                                                                                                                                                   latency depends primarily on the output size. Thus, batching
+
+
+Normalized Power                                                                                                                               Query Latency (s)
+                   1.00                                                                                                                                             200
+
+                   0.75                                                                                                                                             150                                                                                                                        could be used as a power management knob in addition to
+                   0.50                                                                                                                                             100                                                                                                                        frequency locking and power capping.
+                   0.25                                                                                                                                                50
+
+                   0.00                                                                                                                                                   0
+                                                                                                                                                                                                                                                                                               Impact of datatypes. Next, we study the impact of different
+                               Flan-T5 GPT-NeoX                           OPT                Llama2 BLOOM                                                                              Flan-T5 GPT-NeoX                                   OPT             llama2                   BLOOM
+                                                                         Model                                                                                                                                                           Model                                                 quantization modes. We run Llama2-70B and Llama2-13B
+        (e) Power varying output sizes. (f) Latency varying output sizes.                                                                                                                                                                                                                      with FP32, FP16, and INT8 model weights using the bitsand-
+                                                                                                                                                                                                                                                                                               bytes library [13]. A Llama2-70B model with FP32 weights
+Figure 8. Power (mean, peak) and latency sensitivity to the                                                                                                                                                                                                                                    requires at least four A100-80GB GPUs, whereas FP16 or
+input, batch, and output sizes for multiple inference models                                                                                                                                                                                                                                   INT8 weights only need two1 . All Llama2-13B datatype vari-
+running on A100-80GB GPUs.                                                                                                                                                                                                                                                                     ants can fit within a single GPU.
+                                                                                                                                                                                                                                                                                                  We find that quantization significantly impacts overall
+                                                                                                                                                                                                                                                                                               power usage since fewer GPUs tend to draw lesser power. For
+query latency, increasing input sizes shows little impact on                                                                                                                                                                                                                                    1 Note that beyond model weights, extra state is needed for activations, KV
+
+latency until >4096 input tokens.                                                                                                                                                                                                                                                               cache, etc., which could preclude using fewer GPUs for smaller datatypes.
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                                                                                                                                             Patel et al.
+
+
+                                      Flan-T5           Llama2
+                                      GPT-NeoX          BLOOM                                           b=1 i=512            b=1 i=8192                                                                                          0.95
+
+
+
+                                                                                                                                                                                                             Peak Server Power
+                                                                                                                                                                               b=1 i=512       b=1 i=8192
+                                      OPT                                                               b=1 i=2048           b=16 i=512                                        b=1 i=2048      b=16 i=512
+
+
+
+
+Performance Reduction (%)                                             Performance Reduction (%)
+                             0                                                                                                                                                                                                   0.90
+
+
+                                                                                                                                           Performance Reduction (%)
+                                                                                                   0                                                                   10
+
+                                                                                                                                                                        8
+                             5                                                                     5                                                                    6
+                                                                                                                                                                                                                                 0.85
+                            10                                                                    10                                                                    4
+
+
+                            15                                                                    15
+                                                                                                                                                                        2
+
+                                                                                                                                                                        0
+                                                                                                                                                                                                                                 0.80
+                                 20       15      10      5       0                                    20      15      10      5       0
+                                                                                                                                                                                                                                           1.00      1.05 1.10 1.15
+                                                                                                                                                                        1100 1150 1200 1250 1300 1350 1400
+                                       Peak Power Reduction (%)                                             Peak Power Reduction (%)                                               SM Frequency (MHz)
+
+
+                                      (a) All Models.                  (b) BLOOM power reduction. (c) BLOOM freq. sensitivity.
+                                                                                                                                                                                                                                                   Peak GPU Power
+
+Figure 10. Peak power reduction (based on TDP) vs. performance reduction varying                                                                                                                             Figure 11. Server and GPU peak
+GPU SM frequencies. The dashed black line shows linear scaling.                                                                                                                                              power normalized to TDP.
+
+
+Llama2-70B, FP16 is faster and has a higher peak power draw                                                                                                                                                                             Training             Inference
+than other datatypes since it uses tensor cores with highly                                                                                                                       Peak power utilization                                 97%                     79%
+optimized kernels [46]. FP32 and INT8 perform slower due                                                                                                                                                                         Coordinated swings         Diurnal with
+                                                                                                                                                                                    Power usage pattern
+to their larger footprint and less optimized CUDA kernels,                                                                                                                                                                        every few seconds     short-term variations
+respectively [18]. For Llama2-13B, FP16 has a slightly higher                                                                                                                     Max. power spike in 2s                                37.5%                    9%
+                                                                                                                                                                                  Max. power spike in 40s
+peak power draw and much faster performance than FP32,                                                                                                                                                                                     –                   11.8%
+                                                                                                                                                                                  (OOB capping latency)
+also due to its optimized kernel. Custom hardware support
+for datatypes in newer GPUs, like the FP8 engine in NVIDIA                                                                                                                             Table 4. LLM cluster power usage in production.
+H100 [45], could further impact these trade-offs.
+Insight 6: Model quantization reduces model sizes and power
+usage, thereby enabling more workloads to be deployed under                                                                                                                     saving mode. In particular, we see less than a 2% drop in per-
+a power budget. However, it does not impact the fundamental                                                                                                                     formance at ∼100MHz (7%) below the maximum frequency.
+power usage differences between prompt and token phases.                                                                                                                        Overall, across models and configurations, the peak power
+                                                                                                                                                                                reduction from locked frequency execution is substantially
+Impact of capping. Figure 9 shows the impact of power                                                                                                                           higher than the relative performance drop.
+capping and frequency locking on BLOOM inference. Since
+                                                                                                                                                                                Insight 7: Power capping is reactive and triggers when power
+power capping is reactive, power peaks in the prompt phase
+                                                                                                                                                                                exceeds a set threshold, making it more likely to only impact
+sometimes exceed the power cap. On the other hand, fre-
+                                                                                                                                                                                prompt phase power draw. Frequency locking reduces overall
+quency locking incurs performance impact throughout the
+                                                                                                                                                                                power on demand with minimal performance loss. Thus, fre-
+execution, and not just when the power utilization is high.
+                                                                                                                                                                                quency locking may be more effective at enabling safer power
+When oversubscribing power, frequency locking is a more
+                                                                                                                                                                                oversubscription in LLM inference clusters.
+reliable control to reclaim power from desired servers.
+   We quantify the performance and peak power impact of                                                                                                                         4.3     Power Usage Patterns at Scale
+frequency locking. Figure 10a shows the relative peak power
+and performance reduction compared to no capping by vary-                                                                                                                       Next, we profile the power usage patterns at scale from pro-
+ing GPU clock frequencies across all models. We observe                                                                                                                         duction training and inference clusters. We only show sub-
+that the relationship between power reduction and perfor-                                                                                                                       sets of the data and normalize numbers for confidentiality.
+mance is superlinear—significant power (up to 20%) can be                                                                                                                       Server-level power. Figure 11 shows the peak server and
+reclaimed for minimal performance loss (up to 7%). Notably,                                                                                                                     GPU power in a production cluster, relative to their TDP. We
+the sensitivity to peak power reduction mechanisms varies                                                                                                                       observe that: (1) GPU power constitutes on average 60% of
+across different models. Larger models tend to have higher                                                                                                                      server-level power consumption, (2) peak GPU power far ex-
+performance impact; for example, GPT-NeoX incurs no per-                                                                                                                        ceeds the overall server GPU TDP (by up to 500W), aligning
+formance loss while BLOOM exhibits 5% at a similar peak                                                                                                                         with our previous observations (Insights 1 and 4), (3) peak
+power reduction level of 13%. Figure 10b further shows the                                                                                                                      server power is highly correlated with peak GPU power,
+sensitivity results of varying prompt computation (input and                                                                                                                    (4) peak GPU power has a much smaller range than peak
+batch size) for BLOOM. Smaller batches show lower perfor-                                                                                                                       server power, and (5) peak power remains largely unchanged
+mance loss under the same amount of peak power reduc-                                                                                                                           over time since servers are heavily utilized.
+tion. Finally, Figure 10c shows the performance reduction                                                                                                                       Insight 8: GPUs represent the majority of the variable por-
+changing the GPU SM frequencies. Different configurations                                                                                                                       tion of the power draw for LLM workloads at a server-level.
+have similar performance drop at higher frequencies, mak-                                                                                                                       Thus, managing GPU power is critical to improving the power
+ing them lucrative as common operating points for a power                                                                                                                       management of LLM clusters.
+Characterizing Power Management Opportunities for LLMs in the Cloud                      ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+Row-level power. Table 4 shows the normalized aggregate               scale. In their absence, there is still scope for large application
+power consumption patterns of LLM training and inference              owners to use in-band power management interfaces.
+clusters at a large cloud provider. Note that we consider a           Coordinated server power management. Only CPUs and
+cluster running interactive inference service. We observe             GPUs offer flexible server-level knobs for power manage-
+that: (1) training has higher peak and average power draw             ment today. This limits how much power we can reclaim.
+compared to inference, (2) training incurs large swings in            For example, although server fans constitute nearly 25% of
+power consumption within short durations, up to 37.5% of              the server power (Figure 3), servers do not expose a software
+the provisioned power capacity within 2 seconds, whereas              control knob to manage their power-speed trade-offs. Adding
+inference only incurs a change of up to 9%, and (3) inference         knobs to other server components could help develop a coor-
+power consumption shows a diurnal pattern since it is an in-          dinated power management system to reduce unnecessary
+teractive workload; yet, over the course of a few seconds, its        power draw and enable adding more server capacity.
+power usage remains relatively stable compared to training.
+   These differences imply that training tends to put much            5.1   LLM Training Clusters
+higher strain on the cluster power delivery infrastructure
+                                                                      Power oversubscription. LLM training clusters have very
+compared to inference. In particular, power swings at scale
+                                                                      little power headroom during peaks (Table 4). Consequently,
+are a key challenge, as we also observe in Section 4.1 (In-
+                                                                      deploying power oversubscription would lead all servers
+sight 2). In contrast, although power consumption does spike
+                                                                      to repeatedly operate part of the training in power-capped
+across the GPUs serving the same inference during the prompt
+                                                                      mode, switching off some servers to support more power-
+phase (Insights 4 and 5), these spikes are not correlated across
+                                                                      intensive workloads, or a combination of both. These so-
+endpoints serving other inferences. This lack of correlation
+                                                                      lutions are undesirable since they may not effectively uti-
+is due to the variation in arrival times and scheduling at
+                                                                      lize the provisioned compute capacity. Alternatively, the
+cluster scale. Hence, power peaks often do not align. Instead,
+                                                                      training framework could be modified to become power
+a statistical multiplexing of the prompt and token processing
+                                                                      capping aware. For example, the framework could select a
+phases across servers yields lower peak power consumption
+                                                                      power-efficient batch size and make appropriate capping
+at the cluster level.
+                                                                      choices [71]. Such solutions require workload information to
+Insight 9: Despite similar peak power at the server level, LLM        better decide which frequencies would be best for running
+inference clusters offer far more power headroom than training        each model. Therefore, they are best deployed in clusters
+clusters due to better statistical multiplexing of workloads.         where the provider has insight into workload to make power
+Hence, LLM inference clusters are more amenable to power              management decisions [1, 2, 56, 64].
+oversubscription than training clusters.                              Mitigating power swings. Even if sufficient power is pro-
+                                                                      visioned, the power grid must repeatedly ramp the power
+5    Design Implications for LLM Clusters                             supply up/down to support large training power swings.
+We start by discussing general optimizations, then delve into         Due to the massive scale of training workloads, doing so
+specific implications for training and inference clusters.            could be untenable. GPU frequency locking could help some-
+                                                                      what alleviate the magnitude of the power swings at the cost
+Derating GPU servers. Power tends to be overprovisioned               of performance loss. Another alternative is to smooth out
+for GPU servers. For example, the rated power for the DGX-            the power swings by reducing synchronization requirements
+A100 machine is 6500W [44]. Yet, across all our workloads,            and overlapping the computation and communication phases.
+the peak power on our machine never exceeded 5700W. Thus,             Lazy weight updates and asynchronous training techniques
+we could derate the power provisoned per server by up                 could help in this regard.
+to 800W. Reducing power provisioned per server enables
+providers to deploy additional servers under the same infras-         5.2   LLM Inference Clusters
+tructure. Crucially, servers can be derated in existing GPU
+                                                                      Power oversubscription. Since inference power usage pat-
+clusters, thereby partly addressing the GPU capacity crunch
+                                                                      terns are distinct from training, power oversubscription op-
+without waiting on new datacenter construction timelines.
+                                                                      portunities are also different. In particular, inference clusters
+To ensure power safety when derating servers, it is important
+                                                                      have substantial headroom to oversubscribe power due to
+to deploy it with an effective power capping mechanism.
+                                                                      uncorrelated power peaks across different requests. We could
+Better and standardized OOB support. The OOB power                    potentially increase the provisioned server capacity in such
+management interfaces in GPUs today are not only slow, but            a cluster without hitting power peaks. However, to ensure
+completely non-standardized. Hence, building a power man-             safety in corner cases and as workloads evolve, it is impor-
+agement stack that works across vendors is quite challenging.         tant to adopt a power throttling strategy. We build upon this
+With faster, standardized OOB management interfaces, we               insight in Section 6 and design a safe and practical power
+can deploy several power and performance optimizations at             oversubscription framework for LLM inference clusters.
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                   Patel et al.
+
+
+Phase-aware power management. Adapting GPU capping               easier debugging, faster power capping response, and recon-
+based on the inference phase could yield additional bene-        figurability to meet the demands of evolving LLM workloads.
+fits. For example, using lower frequencies during the token
+                                                                 Workload priorities support. LLM workloads have dif-
+phase could help reduce power consumption without sub-
+                                                                 ferent priorities, as guided by application requirements. For
+stantially impacting performance. Alternatively, it would be
+                                                                 example, LLM search is latency sensitive since users are wait-
+interesting to separate prompt computation and token pro-
+                                                                 ing for results, whereas code generation and large-document
+cessing on different GPUs, which enables us to only power
+                                                                 summarization have less strict requirements. In addition,
+cap GPUs that run the token phases [49]. Such separation
+                                                                 LLM inference pricing tiers naturally bucket workloads into
+would require transferring intermediate state between the
+                                                                 priorities. For example, ChatGPT, Azure OpenAI, and other
+prompt and token GPUs, which is promising given the high-
+                                                                 similar services offer free and paid tiers for different SLOs.
+bandwidth Infiniband interconnects in LLM clusters [44].
+                                                                 POLCA should reclaim power in a way that minimizes per-
+                                                                 formance impact on critical workloads.
+6     Case Study: POLCA
+                                                                 Latency-bounded design. Since POLCA targets virtualized
+Based on our characterization insights, we present a case        cloud platforms, it must use OOB power management in-
+study on designing a deployable power oversubscription           terfaces (Section 3.2). Unfortunately, GPU OOB interfaces
+framework for LLM inference clusters: POLCA [50] The             are quite slow (Table 2), which make it challenging to meet
+main goal for POLCA is to maximize the number of addi-           the strict 10s deadline that UPSes set on the power capping
+tional servers deployed using power oversubscription, while      response time [73]. As a safety net, POLCA could rely on
+meeting workload Service Level Objectives (SLOs).                OOB power brake, which throttles all GPUs within the UPS
+                                                                 deadline; unfortunately, power brakes hurt workload perfor-
+6.1   Limitations of Existing Approaches                         mance significantly since they drastically reduce the GPU
+Many prior efforts seek to deploy additional server capacity     frequency. On the other hand, the less aggressive frequency
+in datacenters through better power management techniques.       and power capping can take as long as 40s to take effect.
+These works typically focus on CPU power control knobs [15,      Hence, the POLCA policy should meet power capping re-
+36, 55, 58] and workload-aware placement [23, 73] to enable      sponse deadlines while including scaffolding to avoid power
+power oversubscription [17, 19, 31].                             brakes as much as possible.
+   LLM inference differs from other user-facing workloads
+in two key ways. First, LLM inference workloads consume          6.3   POLCA Design
+high peak (prompt phase) and low average (token phase)
+                                                                 Overview. POLCA enables power oversubscription by ex-
+power within each request. When diverse user requests are
+                                                                 ploiting the power headroom available in LLM inference
+multiplexed in the cluster, it results in power underutiliza-
+                                                                 clusters (Insight 9). As needed, it uses simple, priority-based
+tion even if all servers are busy. In contrast, many existing
+                                                                 capping thresholds to reclaim power from workloads of dif-
+user-facing workloads incur large power usage variations
+                                                                 ferent priorities. Each threshold is associated with three pa-
+primarily as a property of the varying request load (e.g.,
+                                                                 rameters: (1) the target workload priority level, (2) the power
+diurnal utilization [31]).
+                                                                 value at which it triggers, and (3) the capping action. POLCA
+   Second, LLM inference workloads are GPU-intensive, while
+                                                                 proactively caps lower-priority workloads and avoids cap-
+traditional approaches target CPU workloads. Beyond the
+                                                                 ping higher-priority workloads until absolutely necessary
+unique challenges with OOB GPU power management in-
+                                                                 to decrease the likelihood of needing power brakes.
+terfaces described in Section 3.3, GPU servers have much
+                                                                    Since LLM inference clusters benefit from the statistical
+higher power draw than CPU servers (e.g., 5kW vs. 500W).
+                                                                 multiplexing of the prompt and token phases, POLCA uses
+Hence, any power throttling decisions can potentially cause
+                                                                 a higher power aggregation level, namely the PDU breaker,
+large swings in power usage. If not handled correctly, the
+                                                                 to make capping decisions. This corresponds to a row of
+cluster could easily devolve into a state of hysteresis—going
+                                                                 racks as shown in Figure 2. The cloud allocator deployed
+back and forth between capping and uncapping.
+                                                                 with POLCA is aware of workload priorities, and it can make
+                                                                 power-oversubsciption aware allocation to ensure a good
+6.2   Design Goals
+                                                                 mix of high and low-priority jobs in every row [31].
+                                                                    Our design can be retrofitted into existing datacenters,
+Simplicity and configurability. Power oversubscription
+                                                                 without new hardware, meters, or structures. As workloads
+impacts critical large-scale datacenter infrastructure, making
+                                                                 evolve, POLCA infrequently updates the policy parameters
+simplicity highly valuable for a production deployment. Fur-
+                                                                 using power traces and capping history.
+thermore, the potential for rapid evolution of LLMs over a 5+
+year server lifetime requires adaptability. POLCA must use       Example two-threshold policy and workflow. POLCA
+a simple and reliable power management policy to enable          considers a cluster with two workload priority levels for
+Characterizing Power Management Opportunities for LLMs in the Cloud                    ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+simplicity, as shown in Table 6. This can be easily extended          Replicating production traces. We use a six-week power
+to support more priorities by adding thresholds accordingly.          consumption trace between June 21𝑠𝑡 to August 2𝑛𝑑 2023
+Selecting thresholds. POLCA selects the power value for the           from the production inference cluster described in Table 4.
+thresholds by analyzing historical power usage traces. Fur-           Based on this trace and model characteristics (i.e., power
+ther, it selects an uncapping power value sufficiently below          and time per token), we generate a synthetic trace. This syn-
+the capping threshold to avoid hysteresis. Doing so helps             thetic trace contains the arrivals for each inference request
+avoid constant capping and uncapping, which could over-               along with their input and output sizes. The Mean Absolute
+whelm the power management system. In our evaluations,                Percentage Error (MAPE) between the synthetic and origi-
+we choose the uncap thresholds to be 5% below the corre-              nal power timeseries is within 3%. Figure 16 shows example
+sponding capping threshold based on our parameter sweeps.             traces. Note that we only show subsets of the data and nor-
+   Table 5 shows the thresholds and their capping actions for         malize the numbers in the figures for confidentiality reasons.
+our cluster. The lower threshold (T1) applies to low-priority         We use the first week to train the parameters of our power
+workloads and has two objectives: (1) sufficiently avoid cap-         capping policy and evaluate on the subsequent five weeks.
+ping high-priority workloads, and (2) maintain the SLOs
+for the low-priority workloads. Based on Insights 4 and 7,            6.5   Evaluation on policy sweeps for 1-week trace
+we choose frequency capping at T1 to maximize the power
+reclaimed by capping low-priority workloads. Upon reach-              Thresholds. We search for thresholds that maximize addi-
+ing T1, we set all the low-priority workloads to the base             tional servers while meeting SLOs. Our sweep incrementally
+frequency (e.g., 1275 MHz for A100 GPUs).                             adds servers, monitoring workload latency and power brakes.
+   The upper threshold (T2) is chosen to avoid power brakes.          Figure 13 shows our results. We evaluate three combinations
+POLCA sets the threshold based on the observed value of               for T1-T2, namely 75-85%, 89-89%, and 85-95%. In particular,
+maximum power spike in 40s (the OOB capping delay) over               we select the 80-89% configuration to allow for the maximum
+the available trace. When T2 is breached, POLCA starts by             power spike within the OOB capping duration from Table 4.
+frequency capping all the low-priority workloads further                 The 75-85% and 80-89% T1-T2 combinations allow 35%
+down to 1110 MHz. If the power is still above the threshold,          more servers without power brake (dashed gray line), while
+it also caps the high-priority workloads down to 1305MHz              85-95% permits only 32.5% more. 75-85% misses the SLOs
+frequency, so that they incur negligible performance impact           for low-priority workloads by a huge margin, since it starts
+while still some reclaiming power (Insight 7).                        capping them much earlier. On the other hand, 85-95% incurs
+Applying thresholds. Figure 12 shows the hierarchy of teleme-         a lower performance impact on the LP and HP workloads,
+try and control in the power management in POLCA. The                 but is in a much higher danger of leading to power brakes,
+power manager running at rack-level receives frequent teleme-         especially since T2 is not sufficiently below the provisioned
+try from the PDU about row-level telemetry. We assume a               power to avoid large power spikes (up to 11% in Table 4). To
+homogeneous distribution of power and caps for fast control.          balance power brake avoidance and performance based on
+Based on its knowledge of workload priorities, the power              SLOs, we select 𝑇 1 = 80% and 𝑇 2 = 89% for POLCA. With
+manager implements the threshold and caps based on Ta-                these thresholds, we add 30% more servers (dashed red line
+ble 5. Once the BMC at the server gets the per-GPU caps               in Figure 13) to stay strictly within the workload SLOs.
+from the power manager, it configures the GPUs accordingly            Capping frequency. Figure 15a shows the performance
+using an interface like the SMBPBI [42].                              impact of varying the frequency locking for low-priority
+                                                                      workloads at T1. Below 1275 MHz, the LP workloads can no
+6.4   Evaluation Methodology
+                                                                      longer meet their SLO. Thus, we choose 1275 MHz, the base
+We implement a discrete event simulator to evaluate the de-           frequency of A100, as the capping frequency at T1.
+gree of oversubscription that we can support in a production
+LLM inference cluster, described by Table 2. Our simulator
+                                                                      6.6   Evaluation on 6-week traces
+is built for a high-traffic scenario and assumes that all the
+servers are serving inference with models loaded. We first
+                                                                      Power impact. Figure 16 shows the impact on daily power
+show a sweep of parameters in the POLCA policy and then
+                                                                      utilization as we add 30% more servers using POLCA. The
+demonstrate POLCA’s efficacy at oversubscribing power.
+                                                                      main insights are: (1) the power utilization average over 5
+Workloads. We evaluate the workloads as listed in Table 6.            minutes follows the same pattern with a higher power offset,
+We configure the BLOOM-176B model for different tasks                 and (2) the power spikes increase, since the absolute number
+(summarization, search, and chat) based on their input/out-           of workloads that can be triggered together increases.
+put token and priorities. Note that based on Section 4.2,
+BLOOM-176B has the highest performance impact from cap-               Throughput impact. Our simulator assumes a one-request
+ping, making it our worst-case workload.                              buffer per server to simulate queueing delays. This is based
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                                                                                                                                                                         Patel et al.
+
+
+                                                                                                                                       Row-level PDU                                              Workload        Prompt size                        Output size                  Ratio     Priority
+                                                                                                                                        Power meter
+                                                                                                                                                                                                  Summarize        2048-8192                                 256–512               25%        Low
+                        Mode                 Low Priority                                  High Priority                                      Telemetry                                             Search          512–2048                                1024–2048              25%        High
+                 Uncapped                      Uncapped                                      Uncapped                                  Rack Manager                                                  Chat          2048–4096                                128–2048               50%        50:50
+                Threshold T1               Frequency capped                                  Uncapped                                 Power Manager
+                                              (1275 MHz)
+                Threshold T2               Frequency capped                          Frequency capped                           Server                                                                        Metric                     High priority                            Low priority
+                                              (1110 MHz)                                (1305 MHz)                                                       BMC
+                Power brake                Frequency capped                          Frequency capped                                                                                               P50 latency impact                                               < 1%             < 5%
+                                               (288MHz)                                  (288MHz)                                                 SMBPBI                                            P99 latency impact                                               < 5%             < 50%
+                                                                                                                                    GPU0                 ... GPU7                                 Number of power brakes                                               0                0
+
+                Table 5. Power modes for low and high
+                priority workloads.                   Figure 12. Flow of the                                                                                                                      Table 6. Workload distribution and SLOs.
+                                                      power management.
+
+                       Low Pri. p50               Low Pri. p99                                            Low Pri. p50                Low Pri. p99                                           Low Pri. p50              Low Pri. p99
+                       High Pri. p50              High Pri. p99                                           High Pri. p50               High Pri. p99                                          High Pri. p50             High Pri. p99                                             Low Pri. Throughput
+                                                                                                                                                                                     1.100                                                                                       High Pri. Throughput
+                1.08                                                                               1.08
+                                                                                                                                                                                                                               4                                     1.00
+
+
+
+
+                                                                                                                                                                                                                                             Normalized Throughput
+Normalized                                                          Normalized       Normalized                                                          Normalized    Normalized                                              Normalized
+                1.06                                           2.0                                 1.06                                              2.0                             1.075
+                                                                                                                                                                                                                               3                                     0.99
+                                                                                                                                                                       p50 Latency
+                                                                                                                                                                                     1.050
+p50 Latency                                                         p99 Latency      p50 Latency                                                         p99 Latency                                                           p99 Latency
+                1.04                                                                               1.04
+                                                               1.5                                                                                   1.5
+                1.02                                                                               1.02                                                                              1.025                                     2                                     0.98
+                1.00                                           1.0                                 1.00                                              1.0                             1.000                                     1
+                        0            20           40                                                       0          20             40                                                       0          20        40                                                0.97
+                            Added Servers (%)                                                                  Added Servers (%)                                                                  Added Servers (%)                                                  0.96
+                                                                                                                                                                                                                                                                            0       20           40
+                      (a) T1=75%, T2=85%.                                                              (b) T1=80%, T2=89%.                                                              (c) T1=85%, T2=95%.                                                                     Added Servers (%)
+
+
+Figure 13. Threshold space search. The dashed gray line shows the max servers without power                                                                                                                                                  Figure 14. Server through-
+brake events. The dashed red line indicates adding 30% more servers.                                                                                                                                                                         put for POLCA.
+
+                     Low Pri. p50            Low Pri. p99                                     Low Pri. p50                 Low Pri. p99
+                     High Pri. p50           High Pri. p99                                    High Pri. p50                High Pri. p99
+                                                                                                                                                                       (1-Thresh-Low-Pri), (2) single threshold at 89% for all work-
+              1.08                                                                     1.06
+                                                                                                                                    1.75
+                                                                                                                                                                       loads (1-Thresh-All), and (3) no capping (No-cap). All base-
+                                                              Normalized     Normalized
+                                                        2.0
+
+Normalized                                                                                                                                 Normalized
+                                                                                                                                                                       lines include a power brake as fallback for power failure
+              1.06
+                                                                                       1.04
+                                                                                                                                    1.50
+              1.04
+
+p50 Latency                                                   p99 Latency    p50 Latency                                                   p99 Latency
+              1.02
+                                                        1.5
+                                                                                       1.02                                         1.25
+                                                                                                                                                                       safety. The first four bars in Figure 17 show the performance
+              1.00                                      1.0                                                                         1.00
+                                                                                                                                                                       of various baselines normalized against POLCA.
+                          1150   1200     1250   1300                                              0            50            100
+                            SM frequency                                                      Low Priority Servers (%)
+                                                                                                                                                                          1-Thresh-Low-Pri does not meet low-priority SLOs since
+                                                                                                                                                                       it does not gradually reduce their frequency. 1-Thresh-All
+(a) Impact of frequency locking (b) Impact of the fraction of low-
+for low-priority workloads at T1. priority workloads.                                                                                                                  breaches the P99 SLOs for both low- and high-priority work-
+                                                                                                                                                                       loads, since it caps them aggressively at the 89% thresh-
+                        Figure 15. Parameters sweeps for POLCA.                                                                                                        old. POLCA’s dual-threshold policy prioritizes high-priority
+                                                                                                                                                                       workload performance at the expense of low priority work-
+                                                                                                                                                                       loads, while still meeting SLOs for both. No-cap lacks power
+                                                                                                                                                                       brake protection, which impacts P99 and P100 latency. No-cap
+on the typical load balanced setup, reducing the chance of si-                                                                                                         is comparable to POLCA under standard conditions, but vul-
+multaneous capping. Figure 14 shows that for the chosen con-                                                                                                           nerable to model power changes.
+figuration, the high-priority workload remains unaffected,                                                                                                             Impact of short-term changes in workloads. We simulate
+while the low-priority throughput sees a minor < 2% decline.                                                                                                           the impact of workloads becoming more power-intensive
+                                                                                                                                                                       than profiled, which could happen if LLMs are updated to be
+Impact of low-priority workloads. Since we prioritize cap-                                                                                                             more efficient. We uniformly increase the power per work-
+ping low-priority workloads to avoid capping high-priority                                                                                                             load by 5% and reevaluate each policy. The last four bars
+workloads, the fraction of low-priority workloads impacts                                                                                                              in Figure 17 show this performance impact. POLCA is the
+performance. Figure 15 shows the impact on workload per-                                                                                                               most robust maintaining SLOs despite the inevitable work-
+formance as the low- to high-priority ratio in the cluster                                                                                                             load changes. As the changes become more prominent, and
+changes. Decreasing low-priority workloads can cause P99                                                                                                               newer models take over, we reconfigure POLCA.
+SLO violations in high-priority workloads.
+                                                                                                                                                                       Number of power brake events. Although Figure 17 shows
+Comparison with other techniques. We compare our                                                                                                                       the performance impact of various policies, it is also impor-
+dual-threshold power capping policy against three base-                                                                                                                tant to track the number of power brake events. POLCA tar-
+lines: (1) single threshold at 89% for low-priority workloads                                                                                                          gets an SLO of zero power brake events to avoid the alarms
+Characterizing Power Management Opportunities for LLMs in the Cloud                                                                                                       ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+                                                                  Default servers (2s avg)                       30% more servers (2s avg)               (8U, 10.2kW TDP) are much more power dense than typical
+                                                                  Default servers (5min avg)                     30% more servers (5min avg)
+                                                                                                                                                         CPU servers (1U, 600 W TDP).
+                                                                                                                                                            Cooling could become a bottleneck if we significantly
+
+
+               Power Utilization
+                                                                                                                                                         oversubscribe power. However, we do not hit this bottleneck
+                                                                                                                                                         in practice for POLCA’s oversubscription ranges. Beyond
+                                                                                                                                                         traditional air-cooling for GPU servers, recent efforts also
+                                                                                                                                                         consider deploying cold plate and immersion cooling in dat-
+                                                                                                                                                         acenters which would further minimize this concern [28].
+                                                                       1               2               3              4           5             6
+                                                                                                   Time (days)                                           Beyond LLMs. In general, our power capping analysis ap-
+                                                                                                                                                         plies to other user-facing GPU workloads like deep-learning
+Figure 16. Row-level power utilization based on production                                                                                               inference. However, the degree of oversubscription enabled
+data using BLOOM. Y-axis hidden for confidentiality.                                                                                                     may be different depending on target workload characteris-
+                                                                                                                                                         tics. Unlike generative LLMs, vision and multi-modal deep
+                                   POLCA                                          1-Thresh-All             POLCA+5%                    1-Thresh-All+5%   learning inference workloads exhibit relatively stable power
+                                   1-Thresh-Low-Pri                               No-cap                   1-Thresh-Low-Pri+5%         No-cap+5%         consumption patterns. However, they can still reclaim power
+                    4                                                                                                                                    from frequency scaling for small performance loss.
+Normalized Value
+                    3
+
+
+(Lower is better)
+                    2                                                                                                                                    7   Related Work
+                    1
+                    0
+                                                                                                                                                         Our paper is the first to characterize power management
+                                   Low priority                        High priority       Low priority   High priority Low priority High priority       opportunities for modern LLMs and to propose a deployable
+                                   p50 latency                         p50 latency         p99 latency    p99 latency Max latency Max latency
+                                                                                                                                                         framework for power oversubscription. In Section 2 and Sec-
+Figure 17. Performance impact of the dual-threshold POLCA                                                                                                tion 6.1, we discussed related work on power management
+with other thresholding policies at 30% oversubscription.                                                                                                in CPU clusters. We discuss other related efforts below.
+                                                                                                                                                         DL energy efficiency. Some works attempt to improve en-
+                                                                 104
+                                                                                                                                                         ergy efficiency for both training and inference workloads
+                                                                                                                  POLCA
+
+
+
+
+                                        Number of power brakes
+                                                                                                                  1-Thresh-Low-Pri                       through customized frameworks [11, 40, 41, 71] and sys-
+                                                                 103                                              1-Thresh-All
+                                                                                                                  No-cap                                 tem parameters [22]. Reducing average power or energy
+                                                                 102                                              POLCA+5%                               consumption is different from our target of reducing peak
+                                                                                                                  1-Thresh-Low-Pri+5%
+                                                                 101                                              1-Thresh-All+5%                        power, which is essential for server provisioning decisions.
+                                                                                                                  No-cap+5%
+                                                                                                                                                         GPU and DL workload characterization. Many works
+                                                                               Configuration
+                                                                                                                                                         have characterized and analyzed DL workloads in GPU clus-
+                                                                                                                                                         ters [24, 29, 33] to understand utilization and performance.
+Figure 18. Number of power brake events under each con-                                                                                                  Others have studied power behaviors [27, 72] and the implica-
+figuration running default and power-intensive workloads.                                                                                                tions of performance under power management techniques
+                                                                                                                                                         of GPUs [52, 52, 54, 65]. We are the first to study the power
+                                                                                                                                                         characteristics of generative LLMs and peak power.
+this can cause at the cluster level for the cloud provider.
+Figure 18 shows the number of power brake events per pol-                                                                                                8   Conclusion
+icy, for the regular, and scaled-up power usage workloads.
+POLCA incurs no power brakes in the standard scenario, and                                                                                               We characterized the distinct power usage patterns for LLM
+the least when workloads become more power intensive.                                                                                                    training and inference workloads in a production cloud en-
+                                                                                                                                                         vironment. We also analyzed the effectiveness and limita-
+6.7 Discussion                                                                                                                                           tions of existing power management knobs, namely GPU
+                                                                                                                                                         frequency locking and power capping. Based on our insights,
+We summarize additional considerations to improve POLCA.
+                                                                                                                                                         we discussed power implications when building clusters to
+Workload-aware policy. Given the rise of inference-as-a-                                                                                                 run LLMs. Finally, as a concrete use case, we presented and
+service platforms [1, 6, 56], POLCA could be extended to use                                                                                             evaluated a framework to enable safe and efficient power
+workload-specific power profiles to reduce the impact on                                                                                                 oversubscription in LLM inference clusters.
+performance, while getting the most power savings.
+Other provisioning constraints. In practice, we observe                                                                                                  Acknowledgments
+that power is the key bottleneck for LLM cluster provisioning.                                                                                           We thank our shepherd, Lieven Eeckhout, and the anony-
+Space is typically not an issue since both GPU servers and                                                                                               mous reviewers for their helpful feedback. Pratyush Patel
+racks are power dense. For example, modern GPU servers                                                                                                   was partially supported by NSF CNS-2104548 and a research
+like NVIDIA DGX-A100 (6U, 6.5kW TDP) and DGX-H100                                                                                                        grant from VMware.
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                         Patel et al.
+
+
+References                                                                   [20] Sylvain Gugger, Lysandre Debut, Thomas Wolf, Philipp Schmid,
+ [1] Amazon SageMaker. https://aws.amazon.com/sagemaker, 2023.                    Zachary Mueller, and Sourab Mangrulkar. Accelerate: Training and
+ [2] Azure Machine Learning - ML as a Service. https://azure.microsoft.           Inference at Scale Made Simple, Efficient and Adaptable. https:
+     com/en-us/products/machine-learning, 2023.                                   //github.com/huggingface/accelerate, 2022.
+ [3] AMD. ROCm Open Software Platform for GPU Compute. https:                [21] Kim Hazelwood, Sarah Bird, David Brooks, Soumith Chintala, Utku
+     //www.amd.com/en/graphics/servers-solutions-rocm.                            Diril, Dmytro Dzhulgakov, Mohamed Fawzy, Bill Jia, Yangqing Jia,
+ [4] Reza Yazdani Aminabadi, Samyam Rajbhandari, Ammar Ahmad Awan,                Aditya Kalro, James Law, Kevin Lee, Jason Lu, Pieter Noordhuis, Misha
+     Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia          Smelyanskiy, Liang Xiong, and Xiaodong Wang. Applied Machine
+     Zhang, Jeff Rasley, and Yuxiong He. DeepSpeed-Inference: Enabling            Learning at Facebook: A Datacenter Infrastructure Perspective. In
+     Efficient Inference of Transformer Models at Unprecedented Scale. In         HPCA, 2018.
+     SC, 2022.                                                               [22] Miro Hodak, Masha Gorkovenko, and Ajay Dholakia. Towards Power
+ [5] Alex Andonian, Quentin Anthony, Stella Biderman, Sid Black,                  Efficiency in Deep Learning on Data Center Hardware. In BigData,
+     Preetham Gali, Leo Gao, Eric Hallahan, Josh Levy-Kramer, Connor              2019.
+     Leahy, Lucas Nestler, Kip Parker, Michael Pieler, Shivanshu Purohit,    [23] Chang-Hong Hsu, Qingyuan Deng, Jason Mars, and Lingjia Tang.
+     Tri Songz, Wang Phil, and Samuel Weinbach. GPT-NeoX: Large Scale             SmoothOperator: Reducing Power Fragmentation and Improving
+     Autoregressive Language Modeling in PyTorch. https://www.github.             Power Utilization in Large-Scale Datacenters. In ASPLOS, 2018.
+     com/eleutherai/gpt-neox, 2021.                                          [24] Qinghao Hu, Peng Sun, Shengen Yan, Yonggang Wen, and Tianwei
+ [6] Microsoft Azure. Azure OpenAI Service. https://azure.microsoft.com/          Zhang. Characterization and Prediction of Deep Learning Workloads
+     en-us/products/ai-services/openai-service, 2022.                             in Large-scale GPU Datacenters. In SC, 2021.
+ [7] Luiz André Barroso, Urs Hölzle, and Parthasarathy Ranganathan. The      [25] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao
+     Datacenter as a Computer: Designing Warehouse-Scale Machines.                Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui
+     Synthesis Lectures on Computer Architecture, 2018.                           Wu, et al. Gpipe: Efficient Training of Giant Neural Networks Using
+ [8] Emily M Bender, Timnit Gebru, Angelina McMillan-Major, and Shmar-            Pipeline Parallelism. In NeurIPS, 2019.
+     garet Shmitchell. On the Dangers of Stochastic Parrots: Can Language    [26] Intel, Hewlett Packard, NEC, and Dell. Intelligent Platform Manage-
+     Models Be Too Big? In FAccT, 2021.                                           ment Interface Specification (IPMI). https://www.intel.in/content/
+ [9] Srikant Bharadwaj, Shomit Das, Kaushik Mazumdar, Bradford Beck-              www/in/en/products/docs/servers/ipmi/ipmi-second-gen-interface-
+     mann, and Stephen Kosonocky. Predict; Do Not React for Enabling              spec-v2-rev1-1.html, 2013.
+     Efficient Fine Grain DVFS in GPUs. In ASPLOS, 2023.                     [27] Ali Jahanshahi, Hadi Zamani Sabzi, Chester Lau, and Daniel Wong.
+[10] Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared              GPU-NEST: Characterizing Energy Efficiency of Multi-GPU Inference
+     Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam,                 Servers. In CAL, 2020.
+     Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss,     [28] Majid Jalili, Ioannis Manousakis, Íñigo Goiri, Pulkit A. Misra, Ashish
+     Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh,                  Raniwala, Husam Alissa, Bharath Ramakrishnan, Phillip Tuma, Chris-
+     Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse,            tian Belady, Marcus Fontoura, and Ricardo Bianchini. Cost-Efficient
+     Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess,          Overclocking in Immersion-Cooled Datacenters. In ISCA, 2021.
+     Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya      [29] Myeongjae Jeon, Shivaram Venkataraman, Amar Phanishayee, Junjie
+     Sutskever, and Dario Amodei. Language Models Are Few-Shot Learn-             Qian, Wencong Xiao, and Fan Yang. Analysis of Large-Scale Multi-
+     ers. In NeurIPS, 2020.                                                       Tenant GPU clusters for DNN Training Workloads. In USENIX ATC,
+[11] Sangjin Choi, Inhoe Koo, Jeongseob Ahn, Myeongjae Jeon, and                  2019.
+     Youngjin Kwon. EnvPipe: Performance-preserving DNN Training             [30] Kashif Nizam Khan, Mikael Hirki, Tapio Niemi, Jukka K. Nurminen,
+     Framework for Saving Energy. In USENIX ATC, 2023.                            and Zhonghong Ou. RAPL in Action: Experiences in Using RAPL for
+[12] Hyung Won Chung, Le Hou, Shayne Longpre, Barret Zoph, Yi Tay,                Power Measurements. 2018.
+     William Fedus, Eric Li, Xuezhi Wang, Mostafa Dehghani, Siddhartha       [31] Alok Gautam Kumbhare, Reza Azimi, Ioannis Manousakis, Anand
+     Brahma, et al. Scaling Instruction-Finetuned Language Models. arXiv          Bonde, Felipe Frujeri, Nithish Mahalingam, Pulkit A. Misra, Seyyed Ah-
+     preprint arXiv:2210.11416, 2022.                                             mad Javadi, Bianca Schroeder, Marcus Fontoura, and Ricardo Bian-
+[13] Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer.              chini. Prediction-Based Power Oversubscription in Cloud Platforms.
+     LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale. In        In USENIX ATC, 2021.
+     NeurIPS, 2022.                                                          [32] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+[14] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova.            Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.
+     BERT: Pre-training of Deep Bidirectional Transformers for Language           Efficient Memory Management for Large Language Model Serving
+     Understanding. In NAACL, 2019.                                               with PagedAttention. In SOSP, 2023.
+[15] Xiaobo Fan, Wolf-Dietrich Weber, and Luiz Andre Barroso. Power          [33] Baolin Li, Rohin Arora, Siddharth Samsi, Tirthak Patel, William Ar-
+     Provisioning for a Warehouse-sized Computer. In ISCA, 2007.                  cand, David Bestor, Chansup Byun, Rohan Basu Roy, Bill Bergeron,
+[16] International Institute for Strategic Studies. Large Language Models:        John Holodnak, Michael Houle, Matthew Hubbell, Michael Jones,
+     Fast Proliferation and Budding International Competition. Strategic          Jeremy Kepner, Anna Klein, Peter Michaleas, Joseph McDonald, Lau-
+     Comments, 2023.                                                              ren Milechin, Julie Mullen, Andrew Prout, Benjamin Price, Albert
+[17] Xing Fu, Xiaorui Wang, and Charles Lefurgy. How Much Power                   Reuther, Antonio Rosa, Matthew Weiss, Charles Yee, Daniel Edelman,
+     Oversubscription is Safe and Allowed in Data Centers? In ICAC, 2011.         Allan Vanterpool, Anson Cheng, Vijay Gadepally, and Devesh Tiwari.
+[18] GitHub. bitsandbytes: Memory decreases but latency increases. https:         AI-Enabling Workloads on Large-Scale GPU-Accelerated System: Char-
+     //github.com/TimDettmers/bitsandbytes/issues/6, 2022.                        acterization, Opportunities, and Implications. In HPCA, 2022.
+[19] Sriram Govindan, Jeonghwan Choi, Bhuvan Urgaonkar, Anand Siva-          [34] Shaohong Li, Xi Wang, Xiao Zhang, Vasileios Kontorinis, Sreekumar
+     subramaniam, and Andrea Baldini. Statistical Profiling-based Tech-           Kodakara, David Lo, and Parthasarathy Ranganathan. Thunderbolt:
+     niques for Effective Power Provisioning in Data Centers. In EuroSys,         Throughput-Optimized, Quality-of-Service-Aware Power Capping at
+     2009.                                                                        Scale. In OSDI, 2020.
+Characterizing Power Management Opportunities for LLMs in the Cloud                                ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA
+
+
+[35] Shen Li, Yanli Zhao, Rohan Varma, Omkar Salpekar, Pieter Noordhuis,      [56] Google Cloud Platform. Vertex AI. https://cloud.google.com/vertex-ai,
+     Teng Li, Adam Paszke, Jeff Smith, Brian Vaughan, Pritam Damania, and          2023.
+     Soumith Chintala. Pytorch Distributed: Experiences on Accelerating       [57] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei,
+     Data Parallel Training. In VLDB, 2020.                                        and Ilya Sutskever. Language Models are Unsupervised Multitask
+[36] Yang Li, Charles R Lefurgy, Karthick Rajamani, Malcolm S Allen-Ware,          Learners, 2019.
+     Guillermo J Silva, Daniel D Heimsoth, Saugata Ghose, and Onur Mutlu.     [58] Parthasarathy Ranganathan, Phil Leech, David Irwin, and Jeffrey
+     A Scalable Priority-aware Approach to Managing Data Center Server             Chase. Ensemble-level Power Management for Dense Blade Servers.
+     Power. In HPCA, 2019.                                                         In ISCA, 2006.
+[37] Yinhan Liu, Myle Ott, Naman Goyal, Jingfei Du, Mandar Joshi, Danqi       [59] Tirias Research. Why Your AI infrastructure Needs Both Training and
+     Chen, Omer Levy, Mike Lewis, Luke Zettlemoyer, and Veselin Stoyanov.          Inference. 2019.
+     RoBERTa: A Robustly Optimized BERT Pretraining Approach. arXiv           [60] Philipp Schmid. Fine-tune FLAN-T5 XL/XXL using DeepSpeed &
+     preprint arXiv:1907.11692, 2019.                                              Hugging Face Transformers. https://www.philschmid.de/fine-tune-
+[38] Meta. Introducing the AI Research SuperCluster — Meta’s Cutting-              flan-t5-deepspeed.
+     edge AI Supercomputer for AI Research. https://ai.facebook.com/blog/     [61] Amazon Web Services. Amazon EC2 Update – Inf1 Instances
+     ai-rsc/.                                                                      with AWS Inferentia Chips for High Performance Cost-Effective
+[39] Microsoft. DeepSpeed: Model Implementations for Inference (MII).              Inferencing. https://aws.amazon.com/blogs/aws/amazon-ec2-update-
+     https://github.com/microsoft/DeepSpeed-MII.                                   inf1-instances-with-aws-inferentia-chips-for-high-performance-
+[40] Seyed Morteza Nabavinejad, Sherief Reda, and Masoumeh Ebrahimi.               cost-effective-inferencing/.
+     Coordinated Batching and DVFS for DNN Inference on GPU Accelera-         [62] Amazon Web Services. AWS Trainium: High-performance Machine
+     tors. TPDS, 2022.                                                             Learning Training Accelerator, Purpose Built by AWS. https://aws.
+[41] Bin Nie, Ji Xue, Saurabh Gupta, Christian Engelmann, Evgenia Smirni,          amazon.com/machine-learning/trainium/.
+     and Devesh Tiwari. Characterizing Temperature, Power, and Soft-          [63] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley,
+     error Behaviors in Data Center Systems: Insights, Challenges, and             Jared Casper, and Bryan Catanzaro. Megatron-LM: Training Multi-
+     Opportunities. In MASCOTS, 2017.                                              billion Parameter Language Models Using Model Parallelism. arXiv
+[42] NVIDIA.       Data Center GPU Driver.        https://docs.nvidia.com/         preprint arXiv:1909.08053, 2019.
+     datacenter/tesla/pdf/NVIDIA_Data_Center_GPU_Driver_Release_              [64] Dharma Shukla, Muthian Sivathanu, Srinidhi Viswanatha, Bhargav
+     Notes_450_v1.pdf.                                                             Gulavani, Rimma Nehme, Amey Agrawal, Chen Chen, Nipun Kwatra,
+[43] NVIDIA. Data Center GPU Manager (DCGM). https://developer.nvidia.             Ramachandran Ramjee, Pankaj Sharma, Atul Katiyar, Vipul Modi, Vaib-
+     com/dcgm.                                                                     hav Sharma, Abhishek Singh, Shreshth Singhal, Kaustubh Welankar,
+[44] NVIDIA. DGX A100: The Universal System for AI Infrastructure.                 Lu Xun, Ravi Anupindi, Karthik Elangovan, and Mark Russinovich.
+     https://resources.nvidia.com/en-us-dgx-systems/dgx-ai.                        Singularity: Planet-scale, Preemptive and Elastic Scheduling of AI
+[45] NVIDIA. DGX H100. https://www.nvidia.com/en-us/data-center/dgx-               Workloads. arXiv preprint arXiv:2202.07848, 2022.
+     h100/.                                                                   [65] Prasoon Sinha, Akhil Guliani, Rutwik Jain, Brandon Tran, Matthew D
+[46] NVIDIA.         NVIDIA A100 80GB PCIe GPU Product Brief.                      Sinclair, and Shivaram Venkataraman. Not All GPUs Are Created Equal:
+     https://www.nvidia.com/content/dam/en-zz/Solutions/Data-                      Characterizing Variability in Large-scale, Accelerator-rich Systems. In
+     Center/a100/pdf/PB-10577-001_v02.pdf.                                         SC, 2022.
+[47] NVIDIA. System Management Interface (nvidia-smi). https://developer.     [66] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Alma-
+     nvidia.com/nvidia-system-management-interface.                                hairi, Yasmine Babaei, Nikolay Bashlykov, Soumya Batra, Prajjwal
+[48] OpenAI. Scaling Kubernetes to 7,500 Nodes. https://openai.com/                Bhargava, Shruti Bhosale, Dan Bikel, Lukas Blecher, Cristian Canton
+     research/scaling-kubernetes-to-7500-nodes.                                    Ferrer, Moya Chen, Guillem Cucurull, David Esiobu, Jude Fernandes,
+[49] Pratyush Patel, Esha Choukse, Chaojie Zhang, Íñigo Goiri, Aashaka             Jeremy Fu, Wenyin Fu, Brian Fuller, Cynthia Gao, Vedanuj Goswami,
+     Shah, Saeed Maleki, and Ricardo Bianchini. Splitwise: Efficient               Naman Goyal, Anthony Hartshorn, Saghar Hosseini, Rui Hou, Hakan
+     Generative LLM Inference Using Phase Splitting. arXiv preprint                Inan, Marcin Kardas, Viktor Kerkez, Madian Khabsa, Isabel Kloumann,
+     arXiv:2311.18677, 2023.                                                       Artem Korenev, Punit Singh Koura, Marie-Anne Lachaux, Thibaut
+[50] Pratyush Patel, Esha Choukse, Chaojie Zhang, Íñigo Goiri, Brijesh War-        Lavril, Jenya Lee, Diana Liskovich, Yinghai Lu, Yuning Mao, Xavier
+     rier, Nithish Mahalingam, and Ricardo Bianchini. POLCA: Power Over-           Martinet, Todor Mihaylov, Pushkar Mishra, Igor Molybog, Yixin Nie,
+     subscription in LLM Cloud Providers. arXiv preprint arXiv:2308.12908,         Andrew Poulton, Jeremy Reizenstein, Rashi Rungta, Kalyan Saladi,
+     2023.                                                                         Alan Schelten, Ruan Silva, Eric Michael Smith, Ranjan Subramanian,
+[51] Pratyush Patel, Zibo Gong, Syeda Rizvi, Esha Choukse, Pulkit Misra,           Xiaoqing Ellen Tan, Binh Tang, Ross Taylor, Adina Williams, Jian Xi-
+     Thomas Anderson, and Akshitha Sriraman. Towards Improved Power                ang Kuan, Puxin Xu, Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela
+     Management in Cloud GPUs. In CAL, 2023.                                       Fan, Melanie Kambadur, Sharan Narang, Aurelien Rodriguez, Robert
+[52] Tapasya Patki, Zachary Frye, Harsh Bhatia, Francesco Di Natale, James         Stojnic, Sergey Edunov, and Thomas Scialom. Llama 2: Open Foun-
+     Glosli, Helgi Ingolfsson, and Barry Rountree. Comparing GPU Power             dation and Fine-tuned Chat Models. arXiv preprint arXiv:2307.09288,
+     and Frequency Capping: A Case Study with the MuMMI Workflow.                  2023.
+     In WORK, 2019.                                                           [67] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion
+[53] David Patterson, Joseph Gonzalez, Urs Hölzle, Quoc Le, Chen Liang,            Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention
+     Lluis-Miquel Munguia, Daniel Rothchild, David R So, Maud Texier,              is All You Need. In NeurIPS, 2017.
+     and Jeff Dean. The Carbon Footprint of Machine Learning Training         [68] Lan Vu, Hari Sivaraman, and Rishi Bidarkar. GPU Virtualization for
+     Will Plateau, Then Shrink. Computer, 2022.                                    High Performance General Purpose Computing on the ESX Hypervisor.
+[54] Martin Peres. Reverse Engineering Power Management on NVIDIA                  In HPC, 2014.
+     GPUs - A Detailed Overview. In XDC, 2013.                                [69] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond,
+[55] Pavlos Petoumenos, Lev Mukhanov, Zheng Wang, Hugh Leather, and                Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Rémi Louf,
+     Dimitrios S. Nikolopoulos. Power Capping: What Works, What Does               Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara
+     Not. In ICPADS, 2015.
+ASPLOS ’24, April 27-May 1, 2024, La Jolla, CA, USA                                                                                         Patel et al.
+
+
+     Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gug-        NSDI, 2023.
+     ger, Mariama Drame, Quentin Lhoest, and Alexander M. Rush. Trans-        [72] Junyeol Yu, Jongseok Kim, and Euiseong Seo. Know Your Enemy To
+     formers: State-of-the-art Natural Language Processing. In EMNLP,              Save Cloud Energy: Energy-Performance Characterization of Machine
+     2020.                                                                         Learning Serving. In HPCA, 2023.
+[70] BigScience Workshop, Teven Le Scao, Angela Fan, Christopher Akiki,       [73] Chaojie Zhang, Alok Gautam Kumbhare, Ioannis Manousakis, Deli
+     Ellie Pavlick, Suzana Ilić, Daniel Hesslow, Roman Castagné, Alexan-           Zhang, Pulkit A Misra, Rod Assis, Kyle Woolcock, Nithish Mahalingam,
+     dra Sasha Luccioni, François Yvon, Matthias Gallé, Jonathan Tow,              Brijesh Warrier, David Gauthier, Lalu Kunnath, Steve Solomon, Os-
+     Alexander M. Rush, Stella Biderman, Albert Webson, Pawan Sasanka              valdo Morales, Marcus Fontoura, and Ricardo Bianchini. Flex: High-
+     Ammanamanchi, Thomas Wang, Benoît Sagot, Niklas Muennighoff,                  Availability Datacenters With Zero Reserved Power. In ISCA, 2021.
+     Albert Villanova del Moral, Olatunji Ruwase, Rachel Bawden, Stas         [74] Susan Zhang, Stephen Roller, Naman Goyal, Mikel Artetxe, Moya Chen,
+     Bekman, Angelina McMillan-Major, Iz Beltagy, Huu Nguyen, Lucile               Shuohui Chen, Christopher Dewan, Mona Diab, Xian Li, Xi Victoria
+     Saulnier, Samson Tan, Pedro Ortiz Suarez, Victor Sanh, Hugo Lau-              Lin, Todor Mihaylov, Myle Ott, Sam Shleifer, Kurt Shuster, Daniel
+     rençon, Yacine Jernite, Julien Launay, Margaret Mitchell, and Colin           Simig, Punit Singh Koura, Anjali Sridhar, Tianlu Wang, and Luke
+     Raffel. BLOOM: A 176B-Parameter Open-access Multilingual Lan-                 Zettlemoyer. OPT: Open Pre-trained Transformer Language Models.
+     guage Model. arXiv preprint arXiv:2211.05100, 2022.                           arXiv preprint arXiv:2205.01068, 2022.
+[71] Jie You, Jae-Won Chung, and Mosharaf Chowdhury. Zeus: Understand-
+     ing and Optimizing GPU Energy Consumption of DNN Training. In
+
